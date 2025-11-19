@@ -628,5 +628,26 @@ def get_dataset_and_embedding_args() -> (
                 caching=True,
             ),
         ]
+    elif dataset_args.dataset_name == "gameid":
+        return dataset_args, [
+            EmbeddingArgs(
+                feature_names=["interaction"],
+                table_name="interaction",
+                item_vocab_size_or_capacity=2,
+                sharding_type="data_parallel",
+            ),
+            DynamicEmbeddingArgs(
+                feature_names=["item_id"],
+                table_name="item_id",
+                item_vocab_size_or_capacity=HASH_SIZE,
+                item_vocab_gpu_capacity_ratio=0.5,
+            ),
+            DynamicEmbeddingArgs(
+                feature_names=["user_id"],
+                table_name="user_id",
+                item_vocab_size_or_capacity=HASH_SIZE,
+                item_vocab_gpu_capacity_ratio=0.5,
+            ),
+        ]
     else:
         raise ValueError(f"dataset {dataset_args.dataset_name} is not supported")
