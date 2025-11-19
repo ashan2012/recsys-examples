@@ -423,6 +423,82 @@ class MovielensDataProcessor(DataProcessor):
         )
 
 
+class GameIDDataProcessor(DataProcessor):
+    """
+    Data processor for a locally hosted GameID dataset.
+
+    The dataset is expected to live under ``<dataset_path>/gameid`` with a single
+    CSV file containing three columns: ``item_id``, ``user_id``, and ``timestamp``.
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        file_name: str = "interactions.csv",
+        prefix: str = "gameid",
+    ) -> None:
+        super().__init__(
+            download_url="",
+            data_path=data_path,
+            file_name=file_name,
+            prefix=prefix,
+        )
+        self._item_feature_name = "item_id"
+        self._action_feature_name = "interaction"
+        self._contextual_feature_names = ["user_id"]
+        self._raw_file = os.path.join(self._data_path, self._prefix, self._file_name)
+        self._output_file = os.path.join(
+            self._data_path, self._prefix, "processed_seqs.csv"
+        )
+
+    def download(self) -> None:
+        """
+        Validate the existence of the local CSV file.
+
+        Raises:
+            FileNotFoundError: If the expected local file does not exist.
+        """
+        if not os.path.exists(self._raw_file):
+            raise FileNotFoundError(
+                f"GameID dataset not found at {self._raw_file}. "
+                "Please place the local CSV there or set --dataset_path accordingly."
+            )
+
+    def load(self) -> Tuple[None, pd.DataFrame]:
+        log_df = pd.read_csv(self._raw_file)
+        required_columns = {"user_id", "item_id", "timestamp"}
+        missing_columns = required_columns - set(log_df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"Missing required columns {missing_columns} in {self._raw_file}."
+            )
+        log_df = log_df[list(required_columns)].dropna()
+        log_df["user_id"] = log_df["user_id"].astype(int)
+        log_df["item_id"] = log_df["item_id"].astype(int)
+        log_df["timestamp"] = pd.to_numeric(
+            log_df["timestamp"], errors="coerce"
+        ).astype(np.int64)
+        log_df = log_df.sort_values(
+            by=["timestamp", "user_id"], ascending=True, kind="mergesort"
+        )
+        log_df["interaction"] = 1
+        df_grouped_by_user = log_df.groupby("user_id").agg(list).reset_index()
+        return None, df_grouped_by_user
+
+    def preprocess_training(self) -> None:
+        self.download()
+        _, sequence_df = self.load()
+        self._post_process(
+            user_feature_df=None,
+            sequence_feature_df=sequence_df,
+            user_id_feature_name="user_id",
+            contextual_feature_names=self._contextual_feature_names,
+            item_feature_name=self._item_feature_name,
+            action_feature_name=self._action_feature_name,
+            output_file=self._output_file,
+        )
+
+
 class DLRMKuaiRandProcessor(DataProcessor):
     """
 
@@ -715,6 +791,7 @@ dataset_names = (
     "kuairand-pure",
     "kuairand-1k",
     "kuairand-27k",
+    "gameid",
 )
 
 
@@ -757,6 +834,11 @@ def get_common_preprocessors(dataset_path: str):
         data_path=data_path,
         file_name="KuaiRand-27K.tar.gz",
         prefix="KuaiRand-27K",
+    )
+    gameid_dp = GameIDDataProcessor(
+        data_path=data_path,
+        file_name="interactions.csv",
+        prefix="gameid",
     )
     preprocessors = {}
     for key in dataset_names:

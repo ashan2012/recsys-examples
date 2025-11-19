@@ -1,0 +1,31 @@
+TrainerArgs.train_batch_size = 128
+TrainerArgs.eval_batch_size = 128
+TrainerArgs.eval_interval = 100
+TrainerArgs.log_interval = 100
+TrainerArgs.ckpt_save_interval = -1
+TrainerArgs.seed = 2025
+
+DatasetArgs.dataset_name = 'gameid'
+# Update this path so that <dataset_path>/gameid/interactions.csv exists.
+DatasetArgs.dataset_path = '/Users/11186562/publicProject/recsys-examples/tmp_data'
+DatasetArgs.max_sequence_length = 200
+DatasetArgs.max_num_candidates = 64
+DatasetArgs.shuffle = True
+
+NetworkArgs.dtype_str = "bfloat16"
+NetworkArgs.num_layers = 4
+NetworkArgs.num_attention_heads = 4
+NetworkArgs.hidden_size = 256
+NetworkArgs.kv_channels = 64
+NetworkArgs.hidden_dropout = 0.1
+NetworkArgs.norm_epsilon = 1e-6
+NetworkArgs.is_causal = True
+
+OptimizerArgs.optimizer_str = 'adam'
+OptimizerArgs.learning_rate = 1e-3
+OptimizerArgs.adam_beta1 = 0.9
+OptimizerArgs.adam_beta2 = 0.98
+
+RetrievalArgs.num_negatives = 128
+RetrievalArgs.eval_metrics = ("NDCG@10", "NDCG@20", "HR@10")
+
