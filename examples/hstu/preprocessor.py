@@ -466,13 +466,20 @@ class GameIDDataProcessor(DataProcessor):
 
     def load(self) -> Tuple[None, pd.DataFrame]:
         log_df = pd.read_csv(self._raw_file)
-        required_columns = {"user_id", "item_id", "timestamp"}
-        missing_columns = required_columns - set(log_df.columns)
+        required_columns = ["item_id", "user_id", "timestamp"]
+        missing_columns = set(required_columns) - set(log_df.columns)
         if missing_columns:
             raise ValueError(
                 f"Missing required columns {missing_columns} in {self._raw_file}."
             )
-        log_df = log_df[list(required_columns)].dropna()
+        # Ensure column order matches exactly item_id,user_id,timestamp to avoid downstream confusion.
+        if list(log_df.columns[:3]) != required_columns:
+            raise ValueError(
+                f"Expected first three columns to be {required_columns}, "
+                f"but got {list(log_df.columns[:3])}. "
+                f"Please ensure the CSV is formatted as 'item_id,user_id,timestamp'."
+            )
+        log_df = log_df[required_columns].dropna()
         log_df["user_id"] = log_df["user_id"].astype(str)
         log_df["user_id"] = (
             pd.Series(pd.factorize(log_df["user_id"])[0], index=log_df.index)
