@@ -473,7 +473,11 @@ class GameIDDataProcessor(DataProcessor):
                 f"Missing required columns {missing_columns} in {self._raw_file}."
             )
         log_df = log_df[list(required_columns)].dropna()
-        log_df["user_id"] = log_df["user_id"].astype(int)
+        log_df["user_id"] = log_df["user_id"].astype(str)
+        log_df["user_id"] = (
+            pd.Series(pd.factorize(log_df["user_id"])[0], index=log_df.index)
+            .astype(np.int64)
+        )
         log_df["item_id"] = log_df["item_id"].astype(int)
         log_df["timestamp"] = pd.to_numeric(
             log_df["timestamp"], errors="coerce"
