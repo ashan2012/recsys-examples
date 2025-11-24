@@ -213,6 +213,11 @@ class DatasetArgs:
     dataset_path: Optional[str] = None
     max_num_candidates: int = 0
     shuffle: bool = False
+    train_split_ratio: float = 0.7
+
+    def __post_init__(self):
+        if not 0 < self.train_split_ratio < 1:
+            raise ValueError("train_split_ratio must be between 0 and 1.")
 
 
 @gin.configurable

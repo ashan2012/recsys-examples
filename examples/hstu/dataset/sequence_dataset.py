@@ -79,6 +79,7 @@ class SequenceDataset(IterableDataset[Batch]):
         random_seed (int): The random seed for shuffling.
         is_train_dataset (bool): Whether this dataset is for training.
         nrows (int, optional): The number of rows to read from the file. Defaults to None, meaning all rows are read.
+        train_split_ratio (float): Fraction of samples allocated to training split.
     """
 
     def __init__(
@@ -98,6 +99,7 @@ class SequenceDataset(IterableDataset[Batch]):
         random_seed: int,
         is_train_dataset: bool,
         nrows: Optional[int] = None,
+        train_split_ratio: float = 0.7,
     ) -> None:
         super().__init__()
         self._device = torch.cpu.current_device()
@@ -110,7 +112,15 @@ class SequenceDataset(IterableDataset[Batch]):
             )
         self._filter_short_sequences(item_feature_name, max_num_candidates)
         num_total_samples = len(self._seq_logs_frame)
-        train_samples = int(num_total_samples * 0.7)
+        if not 0 < train_split_ratio < 1:
+            raise ValueError("train_split_ratio must be between 0 and 1.")
+        train_samples = max(1, int(num_total_samples * train_split_ratio))
+        train_samples = min(train_samples, num_total_samples - 1)
+        if train_samples <= 0 or num_total_samples - train_samples <= 0:
+            raise ValueError(
+                "train_split_ratio produced empty train or eval split. "
+                "Please adjust the ratio or provide more data."
+            )
         test_samples = num_total_samples - train_samples
         if is_train_dataset:
             self._seq_logs_frame = self._seq_logs_frame.head(train_samples)
@@ -383,6 +393,7 @@ def get_dataset(
         random_seed=random_seed,
         is_train_dataset=True,
         nrows=nrows,
+        train_split_ratio=dataset_args.train_split_ratio,
     )
     if eval_batch_size is not None:
         eval_dataset = SequenceDataset(
@@ -400,6 +411,7 @@ def get_dataset(
             random_seed=random_seed,
             is_train_dataset=False,
             nrows=nrows,
+        train_split_ratio=dataset_args.train_split_ratio,
         )
     else:
         eval_dataset = None
