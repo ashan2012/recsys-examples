@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import time
 from itertools import chain, count, cycle, islice
 from typing import Iterator, Optional, Union
 
@@ -136,7 +137,11 @@ def train_with_pipeline(
     dense_optimizer: torch.optim.Optimizer,
 ):
     gpu_timer = GPUTimer()
-    max_train_iters = trainer_args.max_train_iters or len(train_loader)
+    steps_per_epoch = len(train_loader)
+    if steps_per_epoch <= 0:
+        raise ValueError("Training dataloader length must be positive.")
+    num_epochs = trainer_args.num_epochs if trainer_args.num_epochs else 1
+    max_train_iters = trainer_args.max_train_iters or steps_per_epoch * num_epochs
     gpu_timer.start()
     last_td = 0
     # used to compute achieved flops/s
@@ -155,6 +160,8 @@ def train_with_pipeline(
     iter_slices = batched(train_loader_iter, n)
     start_iter = 0
     pipeline._model.train()
+    last_eval_step = 0
+    epoch_start_time = time.time()
     for batched_iterator in iter_slices:
         # for one slice(every eval interval)
         for train_iter in count(start_iter):
@@ -185,6 +192,38 @@ def train_with_pipeline(
                 ddp_num_candidates.append(ddp_num_candidate.view(-1))
                 tokens_logged += reporting_loss[1]
                 torch.cuda.nvtx.range_pop()
+                step_completed = train_iter + 1
+                need_interval_eval = (
+                    trainer_args.eval_interval
+                    and trainer_args.eval_interval > 0
+                    and step_completed % trainer_args.eval_interval == 0
+                )
+                need_epoch_eval = (
+                    steps_per_epoch > 0
+                    and num_epochs > 0
+                    and step_completed % steps_per_epoch == 0
+                    and (step_completed // steps_per_epoch) <= num_epochs
+                )
+                if (need_interval_eval or need_epoch_eval) and step_completed != last_eval_step:
+                    pipeline._model.eval()
+                    if need_epoch_eval:
+                        epoch_idx = step_completed // steps_per_epoch
+                        print_rank_0(
+                            f"[epoch {epoch_idx}/{num_epochs}] running evaluation"
+                        )
+                        epoch_duration = time.time() - epoch_start_time
+                        print_rank_0(
+                            f"[epoch {epoch_idx}/{num_epochs}] elapsed {epoch_duration:.2f} seconds"
+                        )
+                        epoch_start_time = time.time()
+                    evaluate(
+                        pipeline,
+                        stateful_metric_module,
+                        trainer_args=trainer_args,
+                        eval_loader=eval_loader,
+                    )
+                    pipeline._model.train()
+                    last_eval_step = step_completed
             except StopIteration:
                 start_iter = train_iter
                 torch.cuda.nvtx.range_pop()
@@ -208,12 +247,3 @@ def train_with_pipeline(
                 ddp_num_contextuals = []
                 ddp_num_candidates = []
         # TODO CHECK if train pipeline is flushed
-        if train_iter > 0 and train_iter % trainer_args.eval_interval == 0:
-            pipeline._model.eval()
-            evaluate(
-                pipeline,
-                stateful_metric_module,
-                trainer_args=trainer_args,
-                eval_loader=eval_loader,
-            )
-            pipeline._model.train()

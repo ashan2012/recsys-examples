@@ -2,8 +2,9 @@ TrainerArgs.train_batch_size = 128
 TrainerArgs.eval_batch_size = 128
 TrainerArgs.eval_interval = 100
 TrainerArgs.log_interval = 100
-TrainerArgs.ckpt_save_interval = -1
+TrainerArgs.ckpt_save_interval = 100
 TrainerArgs.seed = 2025
+TrainerArgs.num_epochs = 5
 
 DatasetArgs.dataset_name = 'gameid'
 # Update this path so that <dataset_path>/gameid/interactions.csv exists.
@@ -27,5 +28,5 @@ OptimizerArgs.adam_beta1 = 0.9
 OptimizerArgs.adam_beta2 = 0.98
 
 RetrievalArgs.num_negatives = 128
-RetrievalArgs.eval_metrics = ("NDCG@10", "NDCG@20", "HR@10")
+RetrievalArgs.eval_metrics = ("NDCG@10", "NDCG@20", "HR@10","HR@50")
 

@@ -44,6 +44,8 @@ class TrainerArgs:
         pipeline_type (str): Pipeline overlap type: 'none' (no overlap), 'native'
             (overlap h2d, input dist, fwd+bwd), 'prefetch' (includes prefetch overlap).
             Default: "native".
+        num_epochs (int): Number of epochs to train when `max_train_iters` is not set.
+            Default: 1.
     """
 
     # below batchsize is batchsize_per_gpu
@@ -71,10 +73,13 @@ class TrainerArgs:
     # - native -> overlap [h2d, input dist, fwd+bwd]
     # - prefetch -> overlap [h2d, input dist, prefetch, fwd+bwd]
     pipeline_type: str = "native"  # none, native, prefetch
+    num_epochs: int = 1
 
     def __post_init__(self):
         if isinstance(self.max_train_iters, str):
             self.max_train_iters = int(self.max_train_iters)
+        if self.num_epochs <= 0:
+            raise ValueError("num_epochs must be a positive integer")
 
 
 @dataclass
