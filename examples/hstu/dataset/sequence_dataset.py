@@ -351,6 +351,7 @@ def get_dataset(
     shuffle: bool,
     random_seed: int,
     eval_batch_size: Optional[int] = None,
+    train_split_ratio: float = 0.7,
     *,
     nrows=None,
 ) -> Tuple[SequenceDataset, Optional[SequenceDataset]]:
@@ -393,7 +394,7 @@ def get_dataset(
         random_seed=random_seed,
         is_train_dataset=True,
         nrows=nrows,
-        train_split_ratio=dataset_args.train_split_ratio,
+        train_split_ratio=train_split_ratio,
     )
     if eval_batch_size is not None:
         eval_dataset = SequenceDataset(
@@ -411,7 +412,7 @@ def get_dataset(
             random_seed=random_seed,
             is_train_dataset=False,
             nrows=nrows,
-        train_split_ratio=dataset_args.train_split_ratio,
+        train_split_ratio=train_split_ratio,
         )
     else:
         eval_dataset = None

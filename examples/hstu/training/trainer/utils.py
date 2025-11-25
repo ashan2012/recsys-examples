@@ -260,6 +260,7 @@ def get_data_loader(
             max_num_candidates=dataset_args.max_num_candidates,
             num_generated_batches=100,
             num_tasks=num_tasks,
+            train_split_ratio=trainer_args.train_split_ratio,
         )
         train_dataset = dataset.dummy_dataset.DummySequenceDataset(
             batch_size=trainer_args.train_batch_size, **kwargs
