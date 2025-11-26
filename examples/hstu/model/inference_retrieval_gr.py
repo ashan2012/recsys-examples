@@ -1,0 +1,607 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import warnings
+from typing import List, Optional, Tuple, Union
+
+import torch
+from configs import (
+    InferenceHSTUConfig,
+    KVCacheConfig,
+    KVCacheMetadata,
+    RetrievalConfig,
+    copy_kvcache_metadata,
+    get_kvcache_metadata_buffer,
+)
+from dataset.utils import Batch
+from modules.gpu_kv_cache_manager import HSTUGpuKVCacheManager
+from modules.host_kv_storage_manager import HSTUHostKVStorageManager
+from modules.hstu_block_inference import HSTUBlockInference
+from modules.inference_embedding import InferenceEmbedding
+from modules.jagged_data import JaggedData
+from ops.length_to_offsets import length_to_complete_offsets
+from ops.triton_ops.triton_jagged import triton_split_2D_jagged
+
+
+def get_jagged_metadata_buffer(max_batch_size, max_seq_len, contextual_max_seqlen):
+    int_dtype = torch.int32
+    device = torch.cuda.current_device()
+    return JaggedData(
+        values=None,
+        # hidden states
+        max_seqlen=max_seq_len,
+        seqlen=torch.full(
+            (max_batch_size,), max_seq_len, dtype=int_dtype, device=device
+        ),
+        seqlen_offsets=torch.arange(
+            end=max_batch_size + 1, dtype=int_dtype, device=device
+        )
+        * max_seq_len,
+        # contextual features
+        contextual_max_seqlen=contextual_max_seqlen,
+        contextual_seqlen=torch.full(
+            (max_batch_size,), 0, dtype=int_dtype, device=device
+        )
+        if contextual_max_seqlen > 0
+        else None,
+        contextual_seqlen_offsets=torch.full(
+            (max_batch_size + 1,), 0, dtype=int_dtype, device=device
+        )
+        if contextual_max_seqlen > 0
+        else None,
+        has_interleaved_action=True,
+        scaling_seqlen=-1,
+    )
+
+
+def copy_jagged_metadata(dst_metadata, src_metata):
+    def copy_tensor(dst, src):
+        dst[: src.shape[0], ...].copy_(src, non_blocking=True)
+        dst[src.shape[0] :, ...] = 0
+
+    def copy_offsets(dst, src):
+        dst[: src.shape[0], ...].copy_(src, non_blocking=True)
+        dst[src.shape[0] :, ...] = src[-1, ...]
+
+    bs = src_metata.seqlen.shape[0]
+    dst_metadata.max_seqlen = src_metata.max_seqlen
+    copy_tensor(dst_metadata.seqlen, src_metata.seqlen[:bs])
+    copy_offsets(dst_metadata.seqlen_offsets, src_metata.seqlen_offsets[: bs + 1])
+    dst_metadata.contextual_max_seqlen = src_metata.contextual_max_seqlen
+    if src_metata.contextual_max_seqlen > 0:
+        copy_tensor(dst_metadata.contextual_seqlen, src_metata.contextual_seqlen[:bs])
+        copy_offsets(
+            dst_metadata.contextual_seqlen_offsets,
+            src_metata.contextual_seqlen_offsets[: bs + 1],
+        )
+    dst_metadata.scaling_seqlen = src_metata.scaling_seqlen
+
+
+class InferenceRetrievalGR(torch.nn.Module):
+    """
+    A class representing the retrieval model inference.
+
+    Args:
+        hstu_config (InferenceHSTUConfig): The HSTU configuration.
+        kvcache_config (KVCacheConfig): The KV cache configuration.
+        task_config (RetrievalConfig): The retrieval task configuration.
+    """
+
+    def __init__(
+        self,
+        hstu_config: InferenceHSTUConfig,
+        kvcache_config: KVCacheConfig,
+        task_config: RetrievalConfig,
+        use_cudagraph=False,
+        cudagraph_configs=None,
+    ):
+        super().__init__()
+        self._device = torch.cuda.current_device()
+        self._hstu_config = hstu_config
+        self._task_config = task_config
+
+        self._embedding_dim = hstu_config.hidden_size
+        for ebc_config in task_config.embedding_configs:
+            assert (
+                ebc_config.dim == self._embedding_dim
+            ), "hstu layer hidden size should equal to embedding dim"
+
+        self._embedding_collection = InferenceEmbedding(task_config.embedding_configs)
+
+        self._gpu_kv_cache_manager = HSTUGpuKVCacheManager(hstu_config, kvcache_config)
+        self._host_kv_storage_manager = HSTUHostKVStorageManager(
+            hstu_config, kvcache_config
+        )
+
+        self._hstu_block = HSTUBlockInference(hstu_config, kvcache_config)
+        
+        self._hstu_block = self._hstu_block.cuda()
+
+        dtype = (
+            torch.bfloat16
+            if hstu_config.bf16
+            else torch.float16
+            if hstu_config.fp16
+            else torch.float32
+        )
+        device = torch.cuda.current_device()
+
+        max_batch_size = kvcache_config.max_batch_size
+        max_seq_len = kvcache_config.max_seq_len
+        hidden_dim = hstu_config.hidden_size
+
+        self._hidden_states = torch.randn(
+            (max_batch_size * max_seq_len, hidden_dim), dtype=dtype, device=device
+        )
+        self._jagged_metadata = get_jagged_metadata_buffer(
+            max_batch_size, max_seq_len, hstu_config.contextual_max_seqlen
+        )
+        self._kvcache_metadata = get_kvcache_metadata_buffer(
+            hstu_config, kvcache_config
+        )
+        self._offload_states = None
+        self._kvcache_metadata.onload_history_kv_buffer = [
+            self._gpu_kv_cache_manager.get_onload_buffers(layer_idx)
+            for layer_idx in range(hstu_config.num_layers)
+        ]
+        self._kvcache_metadata.onload_history_kv_events = [
+            torch.cuda.Event() for _ in range(hstu_config.num_layers)
+        ]
+        self._kvcache_metadata.kv_cache_table = [
+            self._gpu_kv_cache_manager.get_kvcache_table(layer_idx)
+            for layer_idx in range(hstu_config.num_layers)
+        ]
+
+        # CUDAGraph optimization
+        self.use_cudagraph = use_cudagraph
+        if use_cudagraph:
+            self._hstu_block.set_cudagraph(
+                max_batch_size,
+                max_seq_len,
+                self._hidden_states,
+                self._jagged_metadata,
+                self._kvcache_metadata,
+                cudagraph_configs=cudagraph_configs,
+            )
+
+    def bfloat16(self):
+        """
+        Convert the model to use bfloat16 precision.
+
+        Returns:
+            InferenceRetrievalGR: The model with bfloat16 precision.
+        """
+        self._hstu_block.bfloat16()
+        return self
+
+    def half(self):
+        """
+        Convert the model to use half precision.
+
+        Returns:
+            InferenceRetrievalGR: The model with half precision.
+        """
+        self._hstu_block.half()
+        return self
+
+    def load_checkpoint(self, checkpoint_dir):
+        """
+        Load the model checkpoint.
+
+        Args:
+            checkpoint_dir (str): The directory containing the checkpoint.
+        """
+        embedding_table_dir = os.path.join(
+            checkpoint_dir,
+            "dynamicemb_module",
+            "model._embedding_collection._model_parallel_embedding_collection",
+        )
+        dynamic_tables = (
+            self._embedding_collection._dynamic_embedding_collection._embedding_tables
+        )
+
+        try:
+            for idx, table_name in enumerate(dynamic_tables.table_names):
+                dynamic_tables.load(
+                    embedding_table_dir, optim=False, table_names=[table_name]
+                )
+        except ValueError as e:
+            warnings.warn(
+                f"FAILED TO LOAD dynamic embedding tables failed due to ValueError:\n\t{e}\n\n"
+                "Please check if the checkpoint is version 1. The loading of this old version is disabled."
+            )
+
+        model_state_dict_path = os.path.join(
+            checkpoint_dir, "torch_module", "model.0.pth"
+        )
+        model_state_dict = torch.load(model_state_dict_path)["model_state_dict"]
+        self.load_state_dict(model_state_dict, strict=False)
+
+    def load_state_dict(self, model_state_dict, *args, **kwargs):
+        """
+        Load the model state dictionary.
+
+        Args:
+            model_state_dict (dict): The model state dictionary.
+        """
+        new_state_dict = {}
+        for k in model_state_dict:
+            if k.startswith(
+                "_embedding_collection._data_parallel_embedding_collection.embeddings."
+            ):
+                emb_table_names = k.split(".")[-1].removesuffix("_weights").split("/")
+                old_emb_table_weights = model_state_dict[k].view(
+                    -1, self._embedding_dim
+                )
+                weight_offset = 0
+                # Skip contextual features if needed
+                for name in emb_table_names:
+                    for emb_config in self._task_config.embedding_configs:
+                        if name == emb_config.table_name:
+                            emb_table_size = emb_config.vocab_size
+                            if self._hstu_config.contextual_max_seqlen == 0:
+                                weight_offset = (
+                                    old_emb_table_weights.shape[0] - emb_table_size
+                                )
+                            break
+                    else:
+                        if self._hstu_config.contextual_max_seqlen == 0:
+                            print(
+                                f"No embedding config found for {name}. Skipped as disabled contextual features."
+                            )
+                            continue
+                        raise Exception("No embedding config found for " + name)
+                    newk = (
+                        "_embedding_collection._static_embedding_collection.embeddings."
+                        + name
+                        + ".weight"
+                    )
+                    new_state_dict[newk] = old_emb_table_weights[
+                        weight_offset : weight_offset + emb_table_size
+                    ]
+                    weight_offset += emb_table_size
+                continue
+            elif "_model_parallel_embedding_collection" in k:
+                continue
+
+            is_transposed = False
+            if k.endswith("_linear_uvqk_weight"):
+                newk = k.removesuffix("_linear_uvqk_weight") + "_linear_uvqk.weight"
+                is_transposed = True
+            elif k.endswith("_linear_uvqk_bias"):
+                newk = k.removesuffix("_linear_uvqk_bias") + "_linear_uvqk.bias"
+            elif k.endswith("_linear_proj_weight"):
+                newk = k.removesuffix("_linear_proj_weight") + "_linear_proj.weight"
+                is_transposed = True
+            else:
+                newk = k
+            new_state_dict[newk] = (
+                model_state_dict[k] if not is_transposed else model_state_dict[k].T
+            )
+
+        unloaded_modules = super().load_state_dict(new_state_dict, *args, **kwargs)
+        for hstu_layer in self._hstu_block._attention_layers:
+            hstu_layer._linear_uvqk_weight.copy_(hstu_layer._linear_uvqk.weight.T)
+            hstu_layer._linear_proj_weight.copy_(hstu_layer._linear_proj.weight.T)
+
+        assert unloaded_modules.missing_keys == [
+            "_embedding_collection._dynamic_embedding_collection._embedding_tables._empty_tensor"
+        ]
+        if self._hstu_config.contextual_max_seqlen != 0:
+            assert unloaded_modules.unexpected_keys == []
+
+    def get_user_kvdata_info(
+        self,
+        user_ids: Union[List[int], torch.Tensor],
+        allow_bubble: bool = False,
+        dbg_print: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get the user KV data information.
+
+        Args:
+            user_ids (Union[List[int], torch.Tensor]): The user IDs.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The start positions and lengths of the user KV data.
+        """
+        kvdata_start_pos = list()
+        kvdata_lengths = list()
+        for idx in range(len(user_ids)):
+            uid = int(user_ids[idx])
+            host_sp, host_len = self._host_kv_storage_manager.get_user_kvdata_info(uid)
+            gpu_sp, gpu_len = self._gpu_kv_cache_manager.get_user_kvdata_info(uid)
+            sp = host_sp if gpu_sp == -1 or gpu_len == 0 else min(host_sp, gpu_sp)
+            length = (
+                host_len
+                if gpu_sp == -1 or gpu_len == 0
+                else (gpu_sp + gpu_len - host_sp)
+            )
+            if gpu_sp > host_sp + host_len and not allow_bubble:
+                warnings.warn(
+                    f"KVdata missing between host storage and gpu kvcache for user {uid}"
+                )
+                length = host_len
+            kvdata_start_pos.append(sp)
+            kvdata_lengths.append(length)
+        return (
+            torch.tensor(kvdata_start_pos, dtype=torch.int32),
+            torch.tensor(kvdata_lengths, dtype=torch.int32),
+        )
+
+    def strip_contextual_features(self, embeddings, batch, user_start_pos):
+        """
+        Strip contextual features from the embeddings if needed.
+
+        Args:
+            embeddings: The embeddings.
+            batch: The batch.
+            user_start_pos: The user start positions.
+
+        Returns:
+            Tuple: The stripped embeddings and batch.
+        """
+        if int(min(user_start_pos)) >= len(batch.contextual_feature_names):
+            embeddings = {
+                batch.item_feature_name: embeddings[batch.item_feature_name],
+                batch.action_feature_name: embeddings[batch.action_feature_name],
+            }
+            batch.contextual_feature_names = []
+            return embeddings, batch
+        elif int(max(user_start_pos)) < len(batch.contextual_feature_names):
+            return embeddings, batch
+        else:
+            raise Exception("Do not accept mixing contextual features input")
+
+    def prepare_kv_cache(
+        self, batch: Batch, user_ids: torch.Tensor, user_start_pos: torch.Tensor
+    ) -> KVCacheMetadata:
+        """
+        Prepare the KV cache for the batch.
+
+        Args:
+            batch (Batch): The batch.
+            user_ids (torch.Tensor): The user IDs.
+            user_start_pos (torch.Tensor): The user start positions.
+
+        Returns:
+            KVCacheMetadata: The KV cache metadata.
+        """
+        batch_size = user_ids.shape[0]
+        new_history_lengths = (
+            torch.sum(batch.features.lengths().view(-1, batch_size), 0).view(-1)
+        )
+        (
+            cached_start_pos,
+            cached_lengths,
+        ) = self._gpu_kv_cache_manager.get_batch_kvdata_info(user_ids)
+
+        self._gpu_kv_cache_manager.allocate(
+            user_ids, user_start_pos, new_history_lengths
+        )
+        kv_cache_metadata = self._gpu_kv_cache_manager.get_cache_metadata(user_ids)
+        append_metadata = self._gpu_kv_cache_manager.get_append_metadata(
+            new_history_lengths, kv_cache_metadata.total_history_lengths
+        )
+        for _field_name in [
+            "batch_indices",
+            "position",
+            "new_history_nnz",
+            "new_history_nnz_cuda",
+        ]:
+            setattr(
+                kv_cache_metadata, _field_name, getattr(append_metadata, _field_name)
+            )
+
+        kv_cache_metadata.onload_history_kv_buffer = (
+            self._kvcache_metadata.onload_history_kv_buffer[:]
+        )
+        kv_cache_metadata.onload_history_kv_events = (
+            self._kvcache_metadata.onload_history_kv_events[:]
+        )
+        kv_cache_metadata.kv_cache_table = self._kvcache_metadata.kv_cache_table[:]
+        (
+            onload_length,
+            onload_kv_page_ids,
+            onload_kv_page_indptr,
+        ) = self._host_kv_storage_manager.lookup_kvdata(
+            user_ids, cached_start_pos, cached_lengths
+        )
+        if onload_length > 0:
+            kv_page_ids = torch.cat([
+                onload_kv_page_ids.view(-1),
+                kv_cache_metadata.kv_indices.view(-1)
+            ])
+            kv_cache_metadata.kv_indices = kv_page_ids.view(-1)
+            kv_cache_metadata.kv_indptr = (
+                onload_kv_page_indptr + kv_cache_metadata.kv_indptr
+            )
+            self._gpu_kv_cache_manager.onload(
+                self._host_kv_storage_manager.get_lookup_buffer(),
+                onload_length,
+                self._kvcache_metadata if self.use_cudagraph else kv_cache_metadata,
+            )
+
+        # cudagraph preparation
+        if self.use_cudagraph:
+            copy_kvcache_metadata(self._kvcache_metadata, kv_cache_metadata)
+
+        return kv_cache_metadata
+
+    def finalize_kv_cache(self, user_ids: torch.Tensor, **kwargs):
+        """
+        Finalize the KV cache.
+
+        Args:
+            user_ids (torch.Tensor): The user IDs.
+        """
+        pass
+
+    def clear_kv_cache(self):
+        """
+        Clear the KV cache.
+        """
+        self._gpu_kv_cache_manager.evict_all()
+        self._host_kv_storage_manager.evict_all_kvdata()
+
+    def offload_kv_cache(
+        self, user_ids: torch.Tensor, kvcache_metadata: KVCacheMetadata
+    ):
+        """
+        Offload the KV cache.
+
+        Args:
+            user_ids (torch.Tensor): The user IDs.
+            kvcache_metadata (KVCacheMetadata): The KV cache metadata.
+        """
+        offload_results = self.offload_kv_cache_async(user_ids, kvcache_metadata)
+        if offload_results is not None:
+            self.offload_kv_cache_wait(offload_results)
+
+    def offload_kv_cache_async(
+        self, user_ids: torch.Tensor, kvcache_metadata: KVCacheMetadata
+    ):
+        """
+        Asynchronously offload the KV cache.
+
+        Args:
+            user_ids (torch.Tensor): The user IDs.
+            kvcache_metadata (KVCacheMetadata): The KV cache metadata.
+
+        Returns:
+            The offload results.
+        """
+        host_kvdata_start_pos, host_kvdata_lengths = zip(
+            *[
+                self._host_kv_storage_manager.get_user_kvdata_info(int(user_ids[idx]))
+                for idx in range(len(user_ids))
+            ]
+        )
+        host_kvdata_start_pos = torch.tensor(host_kvdata_start_pos, dtype=torch.int32)
+        host_kvdata_lengths = torch.tensor(host_kvdata_lengths, dtype=torch.int32)
+
+        offload_results = self._gpu_kv_cache_manager.offload_async(
+            user_ids, host_kvdata_start_pos, host_kvdata_lengths, kvcache_metadata
+        )
+        return offload_results
+
+    def offload_kv_cache_wait(
+        self,
+        offload_results: Optional[
+            Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]
+        ],
+    ):
+        """
+        Wait for the KV cache offload to complete.
+
+        Args:
+            offload_results: The offload results.
+        """
+        if offload_results is not None:
+            self._gpu_kv_cache_manager.offload_wait()
+            self._host_kv_storage_manager.append_kvdata(*offload_results)
+
+    def forward(
+        self,
+        batch: Batch,
+        user_ids: torch.Tensor,
+        user_start_pos: torch.Tensor,
+    ):
+        """
+        Forward pass of the retrieval inference model.
+
+        Args:
+            batch (Batch): The batch.
+            user_ids (torch.Tensor): The user IDs.
+            user_start_pos (torch.Tensor): The user start positions.
+
+        Returns:
+            torch.Tensor: The user embeddings.
+        """
+        with torch.inference_mode():
+            user_start_pos_cuda = user_start_pos.to(
+                device=torch.cuda.current_device(), non_blocking=True
+            )
+            kvcache_metadata = self.prepare_kv_cache(batch, user_ids, user_start_pos)
+            embeddings = self._embedding_collection(batch.features)
+            embeddings, batch = self.strip_contextual_features(
+                embeddings, batch, user_start_pos
+            )
+            jagged_data = self._hstu_block._preprocessor(
+                embeddings=embeddings,
+                batch=batch,
+                seq_start_position=user_start_pos_cuda,
+            )
+
+            num_tokens = batch.features.values().shape[0]
+            if self.use_cudagraph:
+                self._hidden_states[:num_tokens, ...].copy_(
+                    jagged_data.values, non_blocking=True
+                )
+                copy_jagged_metadata(self._jagged_metadata, jagged_data)
+                # self.offload_kv_cache_wait(self._offload_states)
+                
+                hstu_output = self._hstu_block.predict(
+                    batch.batch_size,
+                    num_tokens,
+                    self._hidden_states,
+                    self._jagged_metadata,
+                    self._kvcache_metadata,
+                )
+                jagged_data.values = hstu_output
+            else:
+                # self.offload_kv_cache_wait(self._offload_states)
+                hstu_output = self._hstu_block.predict(
+                    batch.batch_size,
+                    num_tokens,
+                    jagged_data.values,
+                    jagged_data,
+                    kvcache_metadata,
+                )
+                jagged_data.values = hstu_output
+
+            self._gpu_kv_cache_manager._offload_start_event.record(
+                torch.cuda.current_stream()
+            )
+
+            # Apply postprocessor
+            jagged_data = self._hstu_block._postprocessor(jagged_data)
+            
+            # Extract user embeddings (last token's embedding for each user)
+            shift_pred_seqlen_offsets = length_to_complete_offsets(
+                torch.clamp(jagged_data.seqlen - 1, min=0)
+            )
+            user_embeddings, _ = triton_split_2D_jagged(
+                jagged_data.values,
+                jagged_data.max_seqlen,
+                offsets_a=shift_pred_seqlen_offsets,
+                offsets_b=jagged_data.seqlen_offsets - shift_pred_seqlen_offsets,
+            )
+            
+            # Reshape to (batch_size, embedding_dim)
+            user_embeddings = user_embeddings.view(-1, self._embedding_dim)
+            
+            # Normalize embeddings (optional, but common for retrieval)
+            user_embeddings = torch.nn.functional.normalize(
+                user_embeddings, p=2, dim=1, eps=self._task_config.l2_norm_eps
+            )
+            
+            self._offload_states = self.offload_kv_cache_async(
+                user_ids, kvcache_metadata
+            )
+            self.offload_kv_cache_wait(self._offload_states)
+            self.finalize_kv_cache(user_ids)
+
+        return user_embeddings

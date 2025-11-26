@@ -1,6 +1,10 @@
-from . import dummy_dataset, random_inference_dataset, sequence_dataset, utils
+# 从各个模块导入所需的类和函数
+from .inference_dataset import *
+from .inference_dataset_config import *
+from .sequence_dataset import *
+from .utils import *
 
-__all__ = ["dummy_dataset", "random_inference_dataset", "sequence_dataset", "utils"]
+__all__ = ["inference_dataset", "inference_dataset_config", "sequence_dataset", "utils"]
 
 import torch
 from torch.utils.data import DataLoader
