@@ -119,9 +119,15 @@ def main():
 
     model_train.eval()
     with torch.no_grad():
+        retrieval_gr = get_unwrapped_module(model_train)
+        export_table_name = retrieval_gr.get_item_feature_table_name()
+        embedding_args = retrieval_gr._embedding_collection.export_local_embedding(
+                    export_table_name)
+        print(embedding_args)
+
         for batch in test_dataloader:
             embedding, _, _, _ = get_unwrapped_module(model_train).get_logit_and_labels(batch.to(torch.device("cuda", torch.cuda.current_device())))
-            print(embedding.shape)
+            print(embedding)
     init.destroy_global_state()
 
 
