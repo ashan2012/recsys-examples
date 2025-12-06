@@ -4,12 +4,12 @@ TrainerArgs.eval_interval = 100
 TrainerArgs.log_interval = 100
 TrainerArgs.ckpt_save_interval = 100
 TrainerArgs.seed = 2025
-TrainerArgs.num_epochs = 5
+TrainerArgs.num_epochs = 1
 
 DatasetArgs.dataset_name = 'gameid'
 # Update this path so that <dataset_path>/gameid/interactions.csv exists.
-DatasetArgs.dataset_path = '/workspace/recsys-examples-dev/recsys-examples/examples/hstu/tmp_data'
-DatasetArgs.max_sequence_length = 50
+DatasetArgs.dataset_path = '/workspace/recsys-examples-dev-log/recsys-examples/examples/hstu/tmp_data'
+DatasetArgs.max_sequence_length = 512
 # DatasetArgs.max_num_candidates = 64
 DatasetArgs.shuffle = True
 
