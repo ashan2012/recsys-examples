@@ -12,7 +12,8 @@ start_ts=$(date +%s)
 start_str=$(date '+%F %T')
 echo "Training start: ${start_str}"
 
-PYTHONPATH=${PYTHONPATH}:$(realpath ../) torchrun --nproc_per_node 3 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 6000 ./training/pretrain_gr_retrieval.py --gin-config-file ./training/configs/gameid_retrieval.gin 
+export PYTHONPATH=:/workspace/recsys-examples-dev-log/recsys-examples/examples
+torchrun --nproc_per_node 3 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 6000 ./training/pretrain_gr_retrieval.py --gin-config-file ./training/configs/gameid_retrieval.gin 
 
 end_ts=$(date +%s)
 end_str=$(date '+%F %T')
