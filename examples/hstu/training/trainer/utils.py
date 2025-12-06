@@ -640,7 +640,7 @@ def get_dataset_and_embedding_args() -> (
             DynamicEmbeddingArgs(
                 feature_names=["item_id"],
                 table_name="item_id",
-                item_vocab_size_or_capacity=HASH_SIZE,
+                item_vocab_size_or_capacity=5000,
                 item_vocab_gpu_capacity_ratio=0.5,
             ),
             DynamicEmbeddingArgs(
