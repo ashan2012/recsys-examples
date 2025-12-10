@@ -6,12 +6,27 @@
 1. 分析history flag下的用户item序列长度分布
 2. 分析target flag下用户的target数量分布
 
-输入文件格式: item_id,user_id,timestamp,flag
-其中flag包括: target, history
+支持输入格式:
+- 三列格式: item_id,user_id,timestamp
+- 四列格式: item_id,user_id,timestamp,flag (flag包括: target, history)
+
+三列格式会自动基于时间戳推断flag:
+- 每个用户最后一个时间戳的记录标记为target
+- 其余记录标记为history
 
 用法:
+    # 分析四列格式数据
     python analyze_user_sequences.py --input data.csv --output analysis_results.json
-    python analyze_user_sequences.py --input data.csv --print_summary
+    
+    # 分析三列格式数据（自动推断flag）
+    python analyze_user_sequences.py --input data_3col.csv --print_summary
+    
+    # 分析三列格式数据（不推断flag）
+    python analyze_user_sequences.py --input data_3col.csv --print_summary --infer_flags
+    
+    # 创建示例数据
+    python analyze_user_sequences.py --create_sample --sample_format 4col --sample_output data_4col.csv
+    python analyze_user_sequences.py --create_sample --sample_format 3col --sample_output data_3col.csv
 """
 
 import argparse
@@ -26,17 +41,44 @@ import os
 class UserSequenceAnalyzer:
     """用户序列分析器"""
     
-    def __init__(self, input_file: str):
+    def __init__(self, input_file: str, infer_flags: bool = True):
         """
         初始化分析器
         
         Args:
             input_file: 输入CSV文件路径
+            infer_flags: 是否基于时间戳推断flag（用于三列格式）
         """
         self.input_file = input_file
         self.data = None
         self.history_data = None
         self.target_data = None
+        self.infer_flags = infer_flags
+        
+    def _infer_flags(self):
+        """
+        基于时间戳推断flag
+        假设每个用户的时间戳按顺序排列，最后一个时间戳的记录为target，其余为history
+        """
+        print("开始推断flag...")
+        
+        # 为每个用户找到最后一个时间戳
+        last_timestamps = self.data.groupby('user_id')['timestamp'].max()
+        
+        # 初始化flag列
+        self.data = self.data.copy()  # 创建副本避免警告
+        self.data['flag'] = 'history'
+        
+        # 将每个用户的最后一个时间戳标记为target
+        for user_id, last_timestamp in last_timestamps.items():
+            mask = (self.data['user_id'] == user_id) & (self.data['timestamp'] == last_timestamp)
+            self.data.loc[mask, 'flag'] = 'target'
+            
+        # 统计推断结果
+        flag_counts = self.data['flag'].value_counts()
+        print(f"Flag推断结果:")
+        print(f"- History: {flag_counts.get('history', 0)}")
+        print(f"- Target: {flag_counts.get('target', 0)}")
         
     def load_data(self) -> pd.DataFrame:
         """加载数据"""
@@ -45,21 +87,42 @@ class UserSequenceAnalyzer:
         if not os.path.exists(self.input_file):
             raise FileNotFoundError(f"文件不存在: {self.input_file}")
             
-        # 读取CSV文件
+        # 读取CSV文件，尝试三列格式
         try:
-            self.data = pd.read_csv(self.input_file, names=['item_id', 'user_id', 'timestamp', 'flag'])
+            # 先尝试读取三列格式
+            self.data = pd.read_csv(self.input_file, names=['item_id', 'user_id', 'timestamp'])
             print(f"成功加载 {len(self.data)} 条记录")
             print(f"数据预览:")
             print(self.data.head())
+            
+            # 检查是否包含flag列
+            has_flag = False
+            if len(self.data.columns) == 4:
+                # 如果有4列，重新读取包含flag列
+                self.data = pd.read_csv(self.input_file, names=['item_id', 'user_id', 'timestamp', 'flag'])
+                has_flag = True
+                print(f"检测到flag列，加载为四列格式")
+            else:
+                print("三列格式")
+                if self.infer_flags:
+                    # 基于时间戳推断flag
+                    print("基于时间戳推断flag...")
+                    self._infer_flags()
+                else:
+                    print("不推断flag，仅分析时间戳数据")
             
             # 数据基本统计
             print(f"\n数据基本信息:")
             print(f"- 总记录数: {len(self.data)}")
             print(f"- 用户数: {self.data['user_id'].nunique()}")
             print(f"- Item数: {self.data['item_id'].nunique()}")
-            print(f"- Flag分布:")
-            print(self.data['flag'].value_counts())
             
+            if has_flag or ('flag' in self.data.columns):
+                print(f"- Flag分布:")
+                print(self.data['flag'].value_counts())
+            else:
+                print("- 无flag列，无法进行flag相关分析")
+                
             return self.data
             
         except Exception as e:
@@ -74,6 +137,11 @@ class UserSequenceAnalyzer:
             分析结果字典
         """
         print("\n=== 分析History序列长度分布 ===")
+        
+        # 检查是否有flag列
+        if 'flag' not in self.data.columns:
+            print("数据中没有flag列，无法进行history序列分析")
+            return {}
         
         # 过滤history数据
         self.history_data = self.data[self.data['flag'] == 'history'].copy()
@@ -139,6 +207,11 @@ class UserSequenceAnalyzer:
             分析结果字典
         """
         print("\n=== 分析Target数量分布 ===")
+        
+        # 检查是否有flag列
+        if 'flag' not in self.data.columns:
+            print("数据中没有flag列，无法进行target分布分析")
+            return {}
         
         # 过滤target数据
         self.target_data = self.data[self.data['flag'] == 'target'].copy()
@@ -226,6 +299,13 @@ class UserSequenceAnalyzer:
         # 分析target分布
         target_analysis = self.analyze_target_distribution()
         
+        # 安全获取flag分布
+        flag_distribution = {}
+        has_flag = False
+        if self.data is not None and 'flag' in self.data.columns:
+            flag_distribution = self.data['flag'].value_counts().to_dict()
+            has_flag = True
+        
         # 合并结果
         report = {
             'data_summary': {
@@ -233,7 +313,8 @@ class UserSequenceAnalyzer:
                 'total_records': len(self.data) if self.data is not None else 0,
                 'unique_users': self.data['user_id'].nunique() if self.data is not None else 0,
                 'unique_items': self.data['item_id'].nunique() if self.data is not None else 0,
-                'flag_distribution': self.data['flag'].value_counts().to_dict() if self.data is not None else {}
+                'has_flag_column': has_flag,
+                'flag_distribution': flag_distribution
             },
             'history_sequence_analysis': history_analysis,
             'target_distribution_analysis': target_analysis,
@@ -261,12 +342,16 @@ class UserSequenceAnalyzer:
         print(f"   总记录数: {data_summary.get('total_records', 0):,}")
         print(f"   用户数: {data_summary.get('unique_users', 0):,}")
         print(f"   Item数: {data_summary.get('unique_items', 0):,}")
+        print(f"   有flag列: {data_summary.get('has_flag_column', False)}")
         
         # Flag分布
         flag_dist = data_summary.get('flag_distribution', {})
-        print(f"\n🏷️  Flag分布:")
-        for flag, count in flag_dist.items():
-            print(f"   {flag}: {count:,}")
+        if flag_dist:
+            print(f"\n🏷️  Flag分布:")
+            for flag, count in flag_dist.items():
+                print(f"   {flag}: {count:,}")
+        else:
+            print(f"\n🏷️  Flag分布: 无flag列")
             
         # History序列分析
         history_analysis = report.get('history_sequence_analysis', {})
@@ -280,6 +365,8 @@ class UserSequenceAnalyzer:
             distribution = history_analysis.get('distribution', {})
             for threshold, stats in distribution.items():
                 print(f"   ≤{threshold}: {stats['user_count']:,} 用户 ({stats['percentage']}%)")
+        else:
+            print(f"\n📈 History序列长度分布: 无flag列，跳过分析")
                 
         # Target分布分析
         target_analysis = report.get('target_distribution_analysis', {})
@@ -292,11 +379,13 @@ class UserSequenceAnalyzer:
             distribution = target_analysis.get('distribution', {})
             for target_type, stats in distribution.items():
                 print(f"   {target_type}: {stats['user_count']:,} 用户 ({stats['percentage']}%)")
+        else:
+            print(f"\n🎯 Target数量分布: 无flag列，跳过分析")
                 
         print("\n" + "="*60)
 
 
-def create_sample_data(output_file: str = "sample_user_data.csv", num_users: int = 1000, num_items: int = 100):
+def create_sample_data(output_file: str = "sample_user_data.csv", num_users: int = 1000, num_items: int = 100, format_type: str = "4col"):
     """创建示例数据用于测试"""
     print(f"创建示例数据...")
     
@@ -311,25 +400,39 @@ def create_sample_data(output_file: str = "sample_user_data.csv", num_users: int
         
         # 添加history记录（按时间排序）
         for i, item_id in enumerate(history_items):
-            data_records.append({
-                'item_id': item_id + 1,  # Item ID从1开始
-                'user_id': user_id,
-                'timestamp': i + 1,
-                'flag': 'history'
-            })
-            
+            if format_type == "4col":
+                data_records.append({
+                    'item_id': item_id + 1,  # Item ID从1开始
+                    'user_id': user_id,
+                    'timestamp': i + 1,
+                    'flag': 'history'
+                })
+            else:  # 3col格式
+                data_records.append({
+                    'item_id': item_id + 1,
+                    'user_id': user_id,
+                    'timestamp': i + 1
+                })
+                
         # 为每个用户生成target
         num_targets = np.random.choice([1, 2, 3], p=[0.7, 0.25, 0.05])  # 70%用户1个target，25%用户2个target，5%用户3个target
         target_items = np.random.choice(num_items, size=num_targets, replace=False)
         
         for item_id in target_items:
-            data_records.append({
-                'item_id': item_id + 1,
-                'user_id': user_id,
-                'timestamp': num_history + 1,
-                'flag': 'target'
-            })
-            
+            if format_type == "4col":
+                data_records.append({
+                    'item_id': item_id + 1,
+                    'user_id': user_id,
+                    'timestamp': num_history + 1,
+                    'flag': 'target'
+                })
+            else:  # 3col格式
+                data_records.append({
+                    'item_id': item_id + 1,
+                    'user_id': user_id,
+                    'timestamp': num_history + 1
+                })
+                
     # 创建DataFrame并保存
     df = pd.DataFrame(data_records)
     df.to_csv(output_file, index=False, header=False)
@@ -338,8 +441,9 @@ def create_sample_data(output_file: str = "sample_user_data.csv", num_users: int
     print(f"总记录数: {len(df):,}")
     print(f"用户数: {df['user_id'].nunique():,}")
     print(f"Item数: {df['item_id'].nunique():,}")
-    print(f"Flag分布:")
-    print(df['flag'].value_counts())
+    if format_type == "4col":
+        print(f"Flag分布:")
+        print(df['flag'].value_counts())
 
 
 def main():
@@ -351,13 +455,15 @@ def main():
     parser.add_argument("--sample_users", type=int, default=1000, help="示例数据的用户数")
     parser.add_argument("--sample_items", type=int, default=100, help="示例数据的Item数")
     parser.add_argument("--sample_output", type=str, default="sample_user_data.csv", help="示例数据输出文件")
+    parser.add_argument("--sample_format", type=str, default="4col", choices=["3col", "4col"], help="示例数据格式: 3col(无flag列) 或 4col(含flag列)")
+    parser.add_argument("--infer_flags", action="store_true", help="基于时间戳推断flag（用于三列格式）")
     
     args = parser.parse_args()
     
     try:
         # 创建示例数据
         if args.create_sample:
-            create_sample_data(args.sample_output, args.sample_users, args.sample_items)
+            create_sample_data(args.sample_output, args.sample_users, args.sample_items, args.sample_format)
             print("示例数据创建完成，使用 --input 参数指定该文件进行分析")
             return
             
@@ -365,7 +471,7 @@ def main():
             parser.error("请指定输入文件 (--input)")
             
         # 创建分析器
-        analyzer = UserSequenceAnalyzer(args.input)
+        analyzer = UserSequenceAnalyzer(args.input, infer_flags=args.infer_flags)
         
         # 生成报告
         report = analyzer.generate_summary_report()
