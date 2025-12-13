@@ -30,5 +30,5 @@ OptimizerArgs.adam_beta1 = 0.9
 OptimizerArgs.adam_beta2 = 0.98
 
 RetrievalArgs.num_negatives = 128
-RetrievalArgs.eval_metrics = ("NDCG@10", "NDCG@20",""HR@1","HR@5", "HR@10","HR@50")
+RetrievalArgs.eval_metrics = ("NDCG@10", "NDCG@20","HR@1","HR@5", "HR@10","HR@50")
 
