@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=6,7
 export NCCL_TIMEOUT=3600
 export NCCL_ASYNC_ERROR_HANDLING=1
 
@@ -14,7 +14,7 @@ echo "Training start: ${start_str}"
 
 export PYTHONPATH=:/workspace/recsys-examples-eval/recsys-examples/examples
 
-torchrun --nproc_per_node 1 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 6000 ./training/pretrain_gr_retrieval_evalnew.py --gin-config-file ./training/configs/gameid_retrieval.gin 
+torchrun --nproc_per_node 2 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 6000 ./training/pretrain_gr_retrieval_evalnew.py --gin-config-file ./training/configs/gameid_retrieval_eval.gin 
 
 end_ts=$(date +%s)
 end_str=$(date '+%F %T')
