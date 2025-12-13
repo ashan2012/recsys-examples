@@ -21,10 +21,14 @@ import argparse
 from typing import List, Union
 
 import commons.utils.initialize as init
+from commons.utils.logger import print_rank_0
+from commons.utils.stringify import stringify_dict
 import gin
 import torch  # pylint: disable-unused-import
 from configs import RetrievalConfig
 from distributed.sharding import make_optimizer_and_shard
+from megatron.core import parallel_state
+from itertools import chain, count, cycle, islice
 from model import get_retrieval_model
 from modules.metrics import RetrievalTaskMetricWithSampling
 from pipeline.train_pipeline import (
@@ -53,6 +57,49 @@ from utils import (  # from hstu.utils
     TrainerArgs,
 )
 from commons.checkpoint import get_unwrapped_module
+
+
+def evaluate(
+    pipeline: Union[
+        JaggedMegatronPrefetchTrainPipelineSparseDist,
+        JaggedMegatronTrainNonePipeline,
+        JaggedMegatronTrainPipelineSparseDist,
+    ],
+    stateful_metric_module: torch.nn.Module,
+    trainer_args: TrainerArgs,
+    eval_loader: torch.utils.data.DataLoader,):
+    eval_iter = 0
+    torch.cuda.nvtx.range_push(f"#evaluate")
+    max_eval_iters = trainer_args.max_eval_iters or len(eval_loader)
+    max_eval_iters = min(max_eval_iters, len(eval_loader))
+    # make a copy of eval_loader to avoid modifying the original loader
+    iterated_eval_loader = islice(eval_loader, len(eval_loader))
+    with torch.no_grad():
+        for i in range(max_eval_iters):
+            eval_iter += 1
+            reporting_loss, (_, logits, labels, _) = pipeline.progress(
+                iterated_eval_loader
+            )
+            # metric module forward
+            stateful_metric_module(logits, labels)
+        # compute will reset the states
+        if isinstance(stateful_metric_module, RetrievalTaskMetricWithSampling):
+            retrieval_gr = get_unwrapped_module(pipeline._model)
+            export_table_name = retrieval_gr.get_item_feature_table_name()
+            eval_metric_dict, _, _ = stateful_metric_module.compute(
+                *retrieval_gr._embedding_collection.export_local_embedding(
+                    export_table_name
+                ),
+            )
+        else:
+            eval_metric_dict = stateful_metric_module.compute()
+        dp_size = parallel_state.get_data_parallel_world_size()
+    # TODO, fix the samples when there is incomplete batch
+    print_rank_0(
+        f"[eval] [eval {eval_iter * dp_size * trainer_args.eval_batch_size} users]:\n    "
+        + stringify_dict(eval_metric_dict, prefix="Metrics", sep="\n    ")
+    )
+    torch.cuda.nvtx.range_pop()
 
 def create_retrieval_config(
     dataset_args: Union[DatasetArgs, BenchmarkDatasetArgs],
@@ -115,19 +162,28 @@ def main():
     train_dataloader, test_dataloader = get_data_loader(
         "retrieval", dataset_args, trainer_args, 0
     )
+    stateful_metric_module = RetrievalTaskMetricWithSampling(
+        metric_types=task_config.eval_metrics, MAX_K=500
+    )
     maybe_load_ckpts(trainer_args.ckpt_load_dir, model, dense_optimizer)
+    evaluate(
+        pipeline=model_train,
+        stateful_metric_module=stateful_metric_module,
+        trainer_args=trainer_args,
+        eval_loader=test_dataloader,
+    )
 
-    model_train.eval()
-    with torch.no_grad():
-        # retrieval_gr = get_unwrapped_module(model_train)
-        # export_table_name = retrieval_gr.get_item_feature_table_name()
-        # embedding_args = retrieval_gr._embedding_collection.export_local_embedding(
-        #             export_table_name)
-        # print(embedding_args)
+    ##model_train.eval()
+    # with torch.no_grad():
+    #     # retrieval_gr = get_unwrapped_module(model_train)
+    #     # export_table_name = retrieval_gr.get_item_feature_table_name()
+    #     # embedding_args = retrieval_gr._embedding_collection.export_local_embedding(
+    #     #             export_table_name)
+    #     # print(embedding_args)
 
-        for batch in test_dataloader:
-            embedding, _, _, _ = get_unwrapped_module(model_train).get_logit_and_labels(batch.to(torch.device("cuda", torch.cuda.current_device())))
-            print(embedding)
+    #     for batch in test_dataloader:
+    #         embedding, _, _, _ = get_unwrapped_module(model_train).get_logit_and_labels(batch.to(torch.device("cuda", torch.cuda.current_device())))
+    #         print(embedding)
     init.destroy_global_state()
 
 
