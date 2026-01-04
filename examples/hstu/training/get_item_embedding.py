@@ -79,17 +79,22 @@ def load_model_from_checkpoint(
         eval_metrics=("NDCG@10",),
     )
     
-    # 创建模型
+    # 设置CUDA设备（load函数中的barrier需要）
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.set_device(0)
+    
+    # 创建模型（此时模型参数可能是meta tensor，这是正常的）
     model = get_retrieval_model(hstu_config=hstu_config, task_config=task_config)
     
-    # 将模型移到指定设备
-    if device == "cuda" and torch.cuda.is_available():
-        model = model.cuda()
-    
-    # 加载checkpoint
+    # 加载checkpoint（load函数会处理meta tensor，将其替换为实际参数）
     print(f"Loading checkpoint from {checkpoint_dir}")
     load(checkpoint_dir, model, dense_optimizer=None, include_optim_state=False)
     print("Checkpoint loaded successfully")
+    
+    # 加载完checkpoint后，将模型移到指定设备
+    # 此时所有参数都应该是实际tensor，不再是meta tensor
+    if device == "cuda" and torch.cuda.is_available():
+        model = model.cuda()
     
     return model
 
