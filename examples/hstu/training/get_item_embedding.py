@@ -145,6 +145,7 @@ def load_model_from_checkpoint(
 def export_all_item_embeddings(
     model: torch.nn.Module,
     output_file: str,
+    table_name: str = "item_id",
 ) -> Dict[int, np.ndarray]:
     """
     导出所有item_id的embedding
@@ -152,18 +153,12 @@ def export_all_item_embeddings(
     Args:
         model: 加载的模型
         output_file: 输出文件路径
+        table_name: embedding表名称，默认为"item_id"
         
     Returns:
         item_id到embedding的字典
     """
     unwrapped_model = get_unwrapped_module(model)
-    
-    # 获取item feature table name
-    if not hasattr(unwrapped_model, "get_item_feature_table_name"):
-        print("Error: Model does not have get_item_feature_table_name method")
-        return {}
-    
-    table_name = unwrapped_model.get_item_feature_table_name()
     print(f"Exporting all embeddings from table: {table_name}")
     
     # 获取embedding collection
@@ -240,6 +235,12 @@ def main():
         default="item_embeddings.npz",
         help="输出文件路径（默认: item_embeddings.npz）",
     )
+    parser.add_argument(
+        "--table_name",
+        type=str,
+        default="item_id",
+        help="embedding表名称（默认: item_id）",
+    )
     
     args = parser.parse_args()
     
@@ -270,6 +271,7 @@ def main():
         all_embeddings = export_all_item_embeddings(
             model,
             args.output_file,
+            args.table_name,
         )
         
         print("\n" + "=" * 60)
