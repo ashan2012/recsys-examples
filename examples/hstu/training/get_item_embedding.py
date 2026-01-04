@@ -130,14 +130,29 @@ def load_model_from_checkpoint(
             # 过滤掉dynamic embedding表的参数，只保留dense模型参数
             for key, value in model_state_dict.items():
                 # 跳过dynamic embedding表的参数
+                # 检查是否包含dynamic embedding表名
                 is_dynamic_emb = False
                 for table_name in dynamic_table_names:
-                    if f".{table_name}." in key or f".{table_name}_" in key:
+                    # 匹配各种可能的key格式
+                    if (f".{table_name}." in key or 
+                        f".{table_name}_" in key or
+                        f"embeddings.{table_name}." in key or
+                        f"embeddings.{table_name}_" in key):
                         is_dynamic_emb = True
                         break
                 
+                # 额外检查：如果key包含_model_parallel_embedding_collection.embeddings
+                # 且形状是[1,1]，很可能是dynamic embedding的占位符
+                # 或者key明确包含item_id或user_id
+                if "_model_parallel_embedding_collection.embeddings" in key:
+                    if isinstance(value, torch.Tensor) and value.shape == torch.Size([1, 1]):
+                        is_dynamic_emb = True
+                    # 明确检查item_id和user_id
+                    if ".item_id." in key or ".user_id." in key:
+                        is_dynamic_emb = True
+                
                 if is_dynamic_emb:
-                    print(f"Skipping dynamic embedding parameter: {key}")
+                    print(f"Skipping dynamic embedding parameter: {key} (shape: {value.shape if hasattr(value, 'shape') else 'N/A'})")
                     continue
                 
                 # 替换表名：interaction_weights -> interaction
@@ -261,6 +276,136 @@ def get_item_embedding_from_model(
         return None
 
 
+def check_loaded_embeddings(model: torch.nn.Module) -> Dict[str, any]:
+    """
+    检查已加载的embedding表信息
+    
+    Args:
+        model: 加载的模型
+        
+    Returns:
+        包含embedding表信息的字典
+    """
+    unwrapped_model = get_unwrapped_module(model)
+    info = {}
+    
+    if not hasattr(unwrapped_model, "_embedding_collection"):
+        print("Model does not have _embedding_collection attribute")
+        return info
+    
+    embedding_collection = unwrapped_model._embedding_collection
+    
+    # 检查dynamic embedding表
+    if hasattr(embedding_collection, "_dynamic_embedding_collection"):
+        dynamic_emb_collection = embedding_collection._dynamic_embedding_collection
+        if hasattr(dynamic_emb_collection, "_embedding_tables"):
+            dynamic_tables = dynamic_emb_collection._embedding_tables
+            if hasattr(dynamic_tables, "table_names"):
+                info["dynamic_tables"] = list(dynamic_tables.table_names)
+                print(f"Dynamic embedding tables: {info['dynamic_tables']}")
+                
+                # 尝试导出每个表的信息
+                for table_name in dynamic_tables.table_names:
+                    try:
+                        if hasattr(embedding_collection, "export_local_embedding"):
+                            keys, values = embedding_collection.export_local_embedding(table_name)
+                            if isinstance(keys, torch.Tensor):
+                                keys = keys.cpu().numpy()
+                            if isinstance(values, torch.Tensor):
+                                values = values.cpu().numpy()
+                            info[f"{table_name}_keys"] = keys
+                            info[f"{table_name}_values"] = values
+                            info[f"{table_name}_count"] = len(keys)
+                            print(f"  {table_name}: {len(keys)} embeddings, key range: {keys.min()} to {keys.max()}")
+                    except Exception as e:
+                        print(f"  {table_name}: Failed to export - {e}")
+    
+    # 检查dense embedding表
+    if hasattr(embedding_collection, "_data_parallel_embedding_collection"):
+        print("Data parallel embedding collection found")
+    
+    return info
+
+
+def export_all_item_embeddings(
+    model: torch.nn.Module,
+    table_name: Optional[str] = None,
+    output_file: Optional[str] = None,
+) -> Dict[int, np.ndarray]:
+    """
+    导出所有item_id的embedding
+    
+    Args:
+        model: 加载的模型
+        table_name: embedding表名称，如果为None则自动查找
+        output_file: 输出文件路径（可选）
+        
+    Returns:
+        item_id到embedding的字典
+    """
+    unwrapped_model = get_unwrapped_module(model)
+    
+    # 获取item feature table name
+    if hasattr(unwrapped_model, "get_item_feature_table_name"):
+        if table_name is None:
+            table_name = unwrapped_model.get_item_feature_table_name()
+        print(f"Exporting all embeddings from table: {table_name}")
+    
+    # 获取embedding collection
+    if not hasattr(unwrapped_model, "_embedding_collection"):
+        print("Model does not have _embedding_collection attribute")
+        return {}
+    
+    embedding_collection = unwrapped_model._embedding_collection
+    
+    try:
+        if hasattr(embedding_collection, "export_local_embedding"):
+            embedding_export = embedding_collection.export_local_embedding(table_name)
+            
+            if isinstance(embedding_export, tuple) and len(embedding_export) == 2:
+                keys, values = embedding_export
+                
+                # 转换为numpy数组
+                if isinstance(keys, torch.Tensor):
+                    keys = keys.cpu().numpy()
+                if isinstance(values, torch.Tensor):
+                    values = values.cpu().numpy()
+                
+                keys = np.asarray(keys)
+                values = np.asarray(values)
+                
+                print(f"Exported {len(keys)} embeddings from table {table_name}")
+                
+                # 创建字典
+                embeddings_dict = {int(keys[i]): values[i] for i in range(len(keys))}
+                
+                # 保存到文件
+                if output_file:
+                    print(f"Saving all embeddings to {output_file}")
+                    np.savez(output_file, **{f"item_{k}": v for k, v in embeddings_dict.items()})
+                    # 同时保存keys和values数组
+                    np.savez(
+                        output_file.replace(".npz", "_arrays.npz") if output_file.endswith(".npz") else f"{output_file}_arrays.npz",
+                        keys=keys,
+                        values=values,
+                        table_name=table_name
+                    )
+                    print("Embeddings saved successfully")
+                
+                return embeddings_dict
+            else:
+                print(f"Unexpected export format")
+                return {}
+        else:
+            print("embedding_collection does not have export_local_embedding method")
+            return {}
+    except Exception as e:
+        print(f"Error exporting all embeddings: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
 def get_items_embeddings(
     model: torch.nn.Module,
     item_ids: List[int],
@@ -330,6 +475,16 @@ def main():
         choices=["cuda", "cpu"],
         help="设备类型",
     )
+    parser.add_argument(
+        "--check_embeddings",
+        action="store_true",
+        help="检查已加载的embedding表信息",
+    )
+    parser.add_argument(
+        "--export_all",
+        action="store_true",
+        help="导出所有item_id的embedding",
+    )
     
     args = parser.parse_args()
     
@@ -343,15 +498,16 @@ def main():
         print(f"Error: Gin config file {args.gin_config_file} does not exist")
         sys.exit(1)
     
-    # 解析item_ids
+    # 解析item_ids（如果不需要检查或导出所有）
     item_ids = []
-    if args.item_id is not None:
-        item_ids = [args.item_id]
-    elif args.item_ids is not None:
-        item_ids = [int(x.strip()) for x in args.item_ids.split(",")]
-    else:
-        print("Error: Please provide either --item_id or --item_ids")
-        sys.exit(1)
+    if not args.check_embeddings and not args.export_all:
+        if args.item_id is not None:
+            item_ids = [args.item_id]
+        elif args.item_ids is not None:
+            item_ids = [int(x.strip()) for x in args.item_ids.split(",")]
+        else:
+            print("Error: Please provide either --item_id, --item_ids, --check_embeddings, or --export_all")
+            sys.exit(1)
     
     try:
         # 加载模型
@@ -364,35 +520,64 @@ def main():
             device=args.device,
         )
         
-        # 获取embeddings
-        print("=" * 60)
-        print(f"Extracting embeddings for {len(item_ids)} items...")
-        print("=" * 60)
-        embeddings = get_items_embeddings(
-            model,
-            item_ids,
-            table_name=args.table_name,
-        )
+        # 检查已加载的embedding表
+        if args.check_embeddings:
+            print("\n" + "=" * 60)
+            print("Checking loaded embeddings...")
+            print("=" * 60)
+            emb_info = check_loaded_embeddings(model)
+            print("\nEmbedding tables information:")
+            for key, value in emb_info.items():
+                if key.endswith("_count"):
+                    print(f"  {key}: {value}")
+            print("=" * 60)
         
-        # 显示结果
-        print("\n" + "=" * 60)
-        print("Results:")
-        print("=" * 60)
-        for item_id, embedding in embeddings.items():
-            print(f"\nItem ID: {item_id}")
-            if embedding is not None:
-                print(f"  Embedding shape: {embedding.shape}")
-                print(f"  Embedding dtype: {embedding.dtype}")
-                print(f"  Embedding norm: {np.linalg.norm(embedding):.6f}")
-                print(f"  First 10 elements: {embedding[:10]}")
-            else:
-                print("  Embedding not found")
+        # 导出所有item_id的embedding
+        elif args.export_all:
+            print("\n" + "=" * 60)
+            print("Exporting all item embeddings...")
+            print("=" * 60)
+            all_embeddings = export_all_item_embeddings(
+                model,
+                table_name=args.table_name,
+                output_file=args.output_file or "all_item_embeddings.npz",
+            )
+            print(f"\nExported {len(all_embeddings)} item embeddings")
+            if len(all_embeddings) > 0:
+                sample_keys = list(all_embeddings.keys())[:5]
+                print(f"Sample item_ids: {sample_keys}")
+            print("=" * 60)
         
-        # 保存到文件
-        if args.output_file:
-            print(f"\nSaving embeddings to {args.output_file}")
-            np.savez(args.output_file, **{f"item_{item_id}": emb for item_id, emb in embeddings.items() if emb is not None})
-            print("Embeddings saved successfully")
+        # 获取指定item_ids的embeddings
+        else:
+            print("=" * 60)
+            print(f"Extracting embeddings for {len(item_ids)} items...")
+            print("=" * 60)
+            embeddings = get_items_embeddings(
+                model,
+                item_ids,
+                table_name=args.table_name,
+            )
+            
+            # 显示结果
+            print("\n" + "=" * 60)
+            print("Results:")
+            print("=" * 60)
+            for item_id, embedding in embeddings.items():
+                print(f"\nItem ID: {item_id}")
+                if embedding is not None:
+                    print(f"  Embedding shape: {embedding.shape}")
+                    print(f"  Embedding dtype: {embedding.dtype}")
+                    print(f"  Embedding norm: {np.linalg.norm(embedding):.6f}")
+                    print(f"  First 10 elements: {embedding[:10]}")
+                else:
+                    print("  Embedding not found")
+            
+            # 保存到文件
+            if args.output_file:
+                print(f"\nSaving embeddings to {args.output_file}")
+                np.savez(args.output_file, **{f"item_{item_id}": emb for item_id, emb in embeddings.items() if emb is not None})
+                print("Embeddings saved successfully")
         
         print("\n" + "=" * 60)
         print("Done!")
