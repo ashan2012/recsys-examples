@@ -60,28 +60,9 @@ def load_model_from_checkpoint(
     network_args = NetworkArgs()
     tp_args = TensorModelParallelArgs()
     
-    # 初始化分布式环境（单进程模式）
-    # 对于单进程模式，设置必要的环境变量
-    if "LOCAL_RANK" not in os.environ:
-        os.environ["LOCAL_RANK"] = "0"
-    if "RANK" not in os.environ:
-        os.environ["RANK"] = "0"
-    if "WORLD_SIZE" not in os.environ:
-        os.environ["WORLD_SIZE"] = "1"
-    if "MASTER_ADDR" not in os.environ:
-        os.environ["MASTER_ADDR"] = "localhost"
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = "12355"
-    
     # 初始化分布式环境
     if not dist.is_initialized():
-        try:
-            init.initialize_distributed()
-        except KeyError as e:
-            # 如果仍然缺少环境变量，使用单进程初始化
-            print(f"Warning: {e}, using single rank initialization")
-            init.initialize_single_rank()
-    
+        init.initialize_distributed()
     init.initialize_model_parallel(
         tensor_model_parallel_size=tp_args.tensor_model_parallel_size
     )
