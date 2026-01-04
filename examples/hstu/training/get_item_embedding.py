@@ -156,25 +156,98 @@ def load_model_from_checkpoint(
                     continue
                 
                 # 替换表名：interaction_weights -> interaction
+                # 同时处理可能的key格式差异
                 new_key = key.replace("interaction_weights", "interaction")
                 new_key = new_key.replace("action_weights", "interaction")
+                
+                # 如果key是 "interaction" 而不是 "interaction.weight"，需要添加 .weight
+                # 或者如果key是 "interaction.weight" 但模型期望 "interaction"，需要处理
+                # 先尝试原key
                 new_state_dict[new_key] = value
+                
+                # 如果key没有.weight后缀，也尝试添加.weight后缀的版本
+                if not new_key.endswith(".weight") and "embeddings.interaction" in new_key:
+                    weight_key = new_key + ".weight"
+                    # 同时添加带.weight和不带.weight的版本，让load_state_dict选择
+                    new_state_dict[weight_key] = value
             
             print(f"Loading {len(new_state_dict)} dense model parameters...")
+            
+            # 打印一些key示例用于调试
+            if len(new_state_dict) > 0:
+                sample_keys = list(new_state_dict.keys())[:3]
+                print(f"Sample keys to load: {sample_keys}")
+            
             # 使用strict=False加载
             missing_keys, unexpected_keys = unwrapped_model.load_state_dict(
                 new_state_dict, strict=False
             )
+            
+            # 处理missing keys：尝试修复表名不匹配
             if missing_keys:
-                # 过滤掉dynamic embedding相关的missing keys
                 filtered_missing = [k for k in missing_keys if not any(
                     f".{tn}." in k or f".{tn}_" in k for tn in dynamic_table_names
                 )]
                 if filtered_missing:
-                    print(f"Warning: Missing keys: {filtered_missing[:5]}...")
+                    print(f"Warning: Missing keys: {filtered_missing}")
+                    # 尝试从unexpected keys或new_state_dict中找到匹配的
+                    for missing_key in filtered_missing:
+                        # 尝试从unexpected keys中找到匹配的
+                        for unexpected_key in unexpected_keys:
+                            if "interaction" in missing_key and "interaction" in unexpected_key:
+                                print(f"  Attempting to map: {unexpected_key} -> {missing_key}")
+                                # 尝试手动加载
+                                try:
+                                    if unexpected_key in new_state_dict:
+                                        value = new_state_dict[unexpected_key]
+                                        # 使用递归方式设置参数
+                                        keys_parts = missing_key.split(".")
+                                        obj = unwrapped_model
+                                        for part in keys_parts[:-1]:
+                                            if hasattr(obj, part):
+                                                obj = getattr(obj, part)
+                                            else:
+                                                break
+                                        else:
+                                            param_name = keys_parts[-1]
+                                            if hasattr(obj, param_name):
+                                                param = getattr(obj, param_name)
+                                                if param.shape == value.shape:
+                                                    with torch.no_grad():
+                                                        param.data.copy_(value)
+                                                    print(f"  ✓ Manually loaded {missing_key}")
+                                except Exception as e:
+                                    print(f"  ✗ Failed to manually load {missing_key}: {e}")
+            
             if unexpected_keys:
-                print(f"Warning: Unexpected keys: {unexpected_keys[:5]}...")
+                print(f"Warning: Unexpected keys: {unexpected_keys}")
+                # 检查是否有interaction相关的key需要处理
+                for unexpected_key in unexpected_keys:
+                    if "interaction" in unexpected_key and not unexpected_key.endswith(".weight"):
+                        # 尝试添加.weight后缀
+                        weight_key = unexpected_key + ".weight"
+                        if weight_key in new_state_dict:
+                            print(f"  Found matching key: {unexpected_key} -> {weight_key}")
+            
             print("Dense model parameters loaded")
+            
+            # 检查是否还有meta tensor
+            def check_meta_tensors(module, prefix=""):
+                meta_params = []
+                for name, param in module.named_parameters(recurse=False):
+                    if param.is_meta:
+                        meta_params.append(f"{prefix}.{name}" if prefix else name)
+                for name, child in module.named_children():
+                    child_meta = check_meta_tensors(child, f"{prefix}.{name}" if prefix else name)
+                    meta_params.extend(child_meta)
+                return meta_params
+            
+            meta_params = check_meta_tensors(unwrapped_model)
+            if meta_params:
+                print(f"Warning: Found {len(meta_params)} meta tensor parameters:")
+                for mp in meta_params[:10]:
+                    print(f"  {mp}")
+                print("These parameters may cause errors when moving to CUDA")
         else:
             print(f"Warning: No model_state_dict in checkpoint file")
     else:
@@ -182,10 +255,67 @@ def load_model_from_checkpoint(
     
     print("Checkpoint loaded successfully")
     
+    # 检查并处理meta tensor
+    unwrapped_model = get_unwrapped_module(model)
+    
+    def fix_meta_tensors(module, prefix=""):
+        """将meta tensor初始化为零tensor"""
+        fixed_count = 0
+        for name, param in list(module.named_parameters(recurse=False)):
+            if param.is_meta:
+                full_name = f"{prefix}.{name}" if prefix else name
+                print(f"Initializing meta tensor: {full_name}, shape: {param.shape}")
+                try:
+                    # 创建相同形状的零tensor
+                    new_param = torch.nn.Parameter(torch.zeros(param.shape, dtype=param.dtype, device="cpu"))
+                    # 直接替换参数
+                    if hasattr(module, name):
+                        delattr(module, name)
+                    setattr(module, name, new_param)
+                    fixed_count += 1
+                except Exception as e:
+                    print(f"  Failed to fix {full_name}: {e}")
+        for child_name, child in module.named_children():
+            child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+            fixed_count += fix_meta_tensors(child, child_prefix)
+        return fixed_count
+    
+    # 检查是否有meta tensor
+    meta_params = []
+    for name, param in unwrapped_model.named_parameters():
+        if param.is_meta:
+            meta_params.append(name)
+    
+    if meta_params:
+        print(f"Found {len(meta_params)} meta tensor parameters, initializing them...")
+        fixed_count = fix_meta_tensors(unwrapped_model)
+        print(f"Fixed {fixed_count} meta tensor parameters")
+        
+        # 再次检查是否还有meta tensor
+        remaining_meta = []
+        for name, param in unwrapped_model.named_parameters():
+            if param.is_meta:
+                remaining_meta.append(name)
+        if remaining_meta:
+            print(f"Warning: Still have {len(remaining_meta)} meta tensors: {remaining_meta[:5]}")
+        else:
+            print("All meta tensors have been fixed")
+    
     # 加载完checkpoint后，将模型移到指定设备
     # 此时所有参数都应该是实际tensor，不再是meta tensor
     if device == "cuda" and torch.cuda.is_available():
-        model = model.cuda()
+        try:
+            model = model.cuda()
+        except NotImplementedError as e:
+            if "meta tensor" in str(e).lower():
+                print("Error: Still have meta tensors after loading checkpoint")
+                print("This usually means some parameters were not loaded correctly")
+                print("Trying to initialize remaining meta tensors...")
+                # 再次尝试修复
+                fix_meta_tensors(unwrapped_model)
+                model = model.cuda()
+            else:
+                raise
     
     return model
 
