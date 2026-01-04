@@ -36,6 +36,7 @@ from utils import (
     NetworkArgs,
     OptimizerArgs,
     TensorModelParallelArgs,
+    TrainerArgs,
 )
 
 
@@ -57,6 +58,7 @@ def load_model_from_checkpoint(
     gin.parse_config_file(gin_config_file)
     
     # 获取配置参数
+    trainer_args = TrainerArgs()
     dataset_args, embedding_args = get_dataset_and_embedding_args()
     network_args = NetworkArgs()
     optimizer_args = OptimizerArgs()
@@ -68,6 +70,9 @@ def load_model_from_checkpoint(
     init.initialize_model_parallel(
         tensor_model_parallel_size=tp_args.tensor_model_parallel_size
     )
+    
+    # 设置随机种子（必须在 model_parallel 初始化之后）
+    init.set_random_seed(seed=trainer_args.seed)
     
     # 设置CUDA设备
     if torch.cuda.is_available():
@@ -193,7 +198,7 @@ def load_model_from_checkpoint(
     
     print("Checkpoint loaded successfully")
     return model_sharded
-
+    
 
 def export_all_item_embeddings(
     model: torch.nn.Module,
