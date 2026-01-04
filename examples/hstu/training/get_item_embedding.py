@@ -168,23 +168,44 @@ def export_all_item_embeddings(
     
     embedding_collection = unwrapped_model._embedding_collection
     
+    # 直接从dynamic embedding module导出
     try:
-        if hasattr(embedding_collection, "export_local_embedding"):
-            embedding_export = embedding_collection.export_local_embedding(table_name)
-            
-            if isinstance(embedding_export, tuple) and len(embedding_export) == 2:
-                keys, values = embedding_export
+        from dynamicemb.dump_load import get_dynamic_emb_module
+        
+        # 获取model_parallel_embedding_collection
+        if not hasattr(embedding_collection, "_model_parallel_embedding_collection"):
+            print("Error: embedding_collection does not have _model_parallel_embedding_collection")
+            return {}
+        
+        model_parallel_collection = embedding_collection._model_parallel_embedding_collection
+        if model_parallel_collection is None:
+            print("Error: model_parallel_embedding_collection is None")
+            return {}
+        
+        # 获取dynamic embedding modules
+        dynamicemb_modules = get_dynamic_emb_module(model_parallel_collection)
+        
+        if len(dynamicemb_modules) == 0:
+            print("Error: No dynamic embedding modules found")
+            return {}
+        
+        print(f"Found {len(dynamicemb_modules)} dynamic embedding modules")
+        
+        # 查找指定的table
+        for m in dynamicemb_modules:
+            print(f"Checking module with tables: {m.table_names}")
+            if table_name in set(m.table_names):
+                print(f"Found table {table_name}, exporting keys and values...")
+                keys_tensor, values_tensor = m.export_keys_values(
+                    table_name, device=torch.device("cpu")
+                )
                 
-                # 转换为numpy数组
-                if isinstance(keys, torch.Tensor):
-                    keys = keys.cpu().numpy()
-                if isinstance(values, torch.Tensor):
-                    values = values.cpu().numpy()
-                
-                keys = np.asarray(keys)
-                values = np.asarray(values)
+                # 转换为numpy
+                keys = keys_tensor.numpy()
+                values = values_tensor.numpy()
                 
                 print(f"Exported {len(keys)} embeddings from table {table_name}")
+                print(f"Keys shape: {keys.shape}, Values shape: {values.shape}")
                 print(f"Key range: {keys.min()} to {keys.max()}")
                 
                 # 创建字典
@@ -200,12 +221,10 @@ def export_all_item_embeddings(
                 print(f"Embeddings saved to {output_file} and {arrays_file}")
                 
                 return embeddings_dict
-            else:
-                print(f"Error: Unexpected export format")
-                return {}
-        else:
-            print("Error: embedding_collection does not have export_local_embedding method")
-            return {}
+        
+        print(f"Error: Table {table_name} not found in any dynamic embedding module")
+        return {}
+        
     except Exception as e:
         print(f"Error exporting embeddings: {e}")
         import traceback
