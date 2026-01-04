@@ -72,7 +72,7 @@ def load_model_from_checkpoint(
     )
     
     # 设置随机种子（必须在 model_parallel 初始化之后）
-    init.set_random_seed(seed=trainer_args.seed)
+    init.set_random_seed(trainer_args.seed)
     
     # 设置CUDA设备
     if torch.cuda.is_available():
