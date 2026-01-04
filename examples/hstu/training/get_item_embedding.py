@@ -23,13 +23,18 @@ import commons.utils.initialize as init
 from commons.checkpoint import get_unwrapped_module
 from configs import RetrievalConfig
 from model import get_retrieval_model
+from pipelines import make_optimizer_and_shard
 from trainer.utils import (
+    create_dynamic_optitons_dict,
     create_embedding_configs,
     create_hstu_config,
+    create_optimizer_params,
     get_dataset_and_embedding_args,
+    get_embedding_vector_storage_multiplier,
 )
 from utils import (
     NetworkArgs,
+    OptimizerArgs,
     TensorModelParallelArgs,
 )
 
@@ -54,6 +59,7 @@ def load_model_from_checkpoint(
     # 获取配置参数
     dataset_args, embedding_args = get_dataset_and_embedding_args()
     network_args = NetworkArgs()
+    optimizer_args = OptimizerArgs()
     tp_args = TensorModelParallelArgs()
     
     # 初始化分布式环境
@@ -83,8 +89,29 @@ def load_model_from_checkpoint(
     print("Creating model...")
     model = get_retrieval_model(hstu_config=hstu_config, task_config=task_config)
     
+    # 设置dynamic embeddings (这一步很关键！)
+    print("Setting up dynamic embeddings...")
+    dynamic_options_dict = create_dynamic_optitons_dict(
+        embedding_args,
+        network_args.hidden_size,
+        training=False,  # 推理模式
+        embedding_dim_multiplier=get_embedding_vector_storage_multiplier(
+            optimizer_args.optimizer_str
+        ),
+    )
+    optimizer_param = create_optimizer_params(optimizer_args)
+    model_sharded, _ = make_optimizer_and_shard(
+        model,
+        config=hstu_config,
+        sparse_optimizer_param=optimizer_param,
+        dense_optimizer_param=optimizer_param,
+        dynamicemb_options_dict=dynamic_options_dict,
+        pipeline_type="native",  # 使用简单的pipeline
+    )
+    print("Dynamic embeddings setup complete")
+    
     # 加载checkpoint
-    unwrapped_model = get_unwrapped_module(model)
+    unwrapped_model = get_unwrapped_module(model_sharded)
     
     # 1. 加载dynamic embedding表
     from dynamicemb.dump_load import DynamicEmbLoad as dynamic_emb_load
@@ -165,7 +192,7 @@ def load_model_from_checkpoint(
     print("Model ready (staying on CPU for embedding export)")
     
     print("Checkpoint loaded successfully")
-    return model
+    return model_sharded
 
 
 def export_all_item_embeddings(
