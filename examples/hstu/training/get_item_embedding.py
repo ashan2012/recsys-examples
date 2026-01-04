@@ -96,72 +96,10 @@ def load_model_from_checkpoint(
     else:
         print(f"Warning: Dynamic embedding directory {save_dir} not found")
     
-    # 2. 加载dense模型参数（过滤掉dynamic embedding表的参数）
-    save_path = os.path.join(
-        checkpoint_dir, "torch_module", "model.{}.pth".format(dist.get_rank())
-    )
-    if os.path.exists(save_path):
-        print("Loading dense model parameters...")
-        state_dict = torch.load(save_path, map_location="cpu")
-        if "model_state_dict" in state_dict:
-            model_state_dict = state_dict["model_state_dict"]
-            new_state_dict = {}
-            
-            # 获取dynamic embedding表名
-            dynamic_table_names = set()
-            if hasattr(unwrapped_model, "_embedding_collection"):
-                embedding_collection = unwrapped_model._embedding_collection
-                if hasattr(embedding_collection, "_dynamic_embedding_collection"):
-                    dynamic_emb_collection = embedding_collection._dynamic_embedding_collection
-                    if hasattr(dynamic_emb_collection, "_embedding_tables"):
-                        dynamic_tables = dynamic_emb_collection._embedding_tables
-                        if hasattr(dynamic_tables, "table_names"):
-                            dynamic_table_names = set(dynamic_tables.table_names)
-            
-            # 过滤掉dynamic embedding表的参数
-            for key, value in model_state_dict.items():
-                # 跳过dynamic embedding表的参数
-                is_dynamic_emb = False
-                for table_name in dynamic_table_names:
-                    if (f".{table_name}." in key or 
-                        f".{table_name}_" in key or
-                        f"embeddings.{table_name}." in key or
-                        ".item_id." in key or 
-                        ".user_id." in key):
-                        is_dynamic_emb = True
-                        break
-                
-                # 检查是否是[1,1]形状的占位符
-                if "_model_parallel_embedding_collection.embeddings" in key:
-                    if isinstance(value, torch.Tensor) and value.shape == torch.Size([1, 1]):
-                        is_dynamic_emb = True
-                
-                if is_dynamic_emb:
-                    continue
-                
-                # 处理表名不匹配
-                new_key = key.replace("interaction_weights", "interaction")
-                new_key = new_key.replace("action_weights", "interaction")
-                new_state_dict[new_key] = value
-                
-                # 同时添加带和不带.weight的版本（处理interaction表）
-                if "interaction" in new_key and not new_key.endswith(".weight"):
-                    new_state_dict[new_key + ".weight"] = value
-            
-            # 加载dense参数
-            missing_keys, unexpected_keys = unwrapped_model.load_state_dict(
-                new_state_dict, strict=False
-            )
-            
-            # 过滤掉dynamic embedding相关的missing keys
-            filtered_missing = [k for k in missing_keys if not any(
-                f".{tn}." in k or f".{tn}_" in k or ".item_id." in k or ".user_id." in k
-                for tn in dynamic_table_names
-            )]
-            if filtered_missing:
-                print(f"Warning: Missing keys (non-dynamic): {filtered_missing[:3]}...")
-            
-            print("Dense model parameters loaded")
+    # 2. 跳过dense模型参数的加载（我们只需要item_id的embedding，不需要其他参数）
+    # 注意：如果需要完整的模型推理，可以取消下面的注释
+    # 但为了只导出item_id embedding，我们跳过这一步以避免形状不匹配错误
+    print("Skipping dense model parameters loading (only need item_id embeddings)")
     
     # 移动到CUDA
     if torch.cuda.is_available():
