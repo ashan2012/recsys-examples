@@ -21,7 +21,7 @@ import gin
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import commons.utils.initialize as init
-from commons.checkpoint import get_unwrapped_module, load
+from commons.checkpoint import get_unwrapped_module
 from configs import RetrievalConfig
 from model import get_retrieval_model
 from trainer.utils import (
@@ -86,9 +86,54 @@ def load_model_from_checkpoint(
     # 创建模型（此时模型参数可能是meta tensor，这是正常的）
     model = get_retrieval_model(hstu_config=hstu_config, task_config=task_config)
     
-    # 加载checkpoint（load函数会处理meta tensor，将其替换为实际参数）
+    # 加载checkpoint
+    # 注意：dynamic embedding表通过dynamic_emb_load加载
+    # dense embedding表通过load_state_dict加载，但需要使用strict=False处理表名不匹配
     print(f"Loading checkpoint from {checkpoint_dir}")
-    load(checkpoint_dir, model, dense_optimizer=None, include_optim_state=False)
+    
+    unwrapped_model = get_unwrapped_module(model)
+    
+    # 1. 加载dynamic embedding表
+    from dynamicemb.dump_load import DynamicEmbLoad as dynamic_emb_load
+    save_dir = os.path.join(checkpoint_dir, "dynamicemb_module")
+    if os.path.exists(save_dir):
+        print("Loading dynamic embedding tables...")
+        dynamic_emb_load(save_dir, unwrapped_model, optim=False)
+        print("Dynamic embedding tables loaded")
+    else:
+        print(f"Warning: Dynamic embedding directory {save_dir} not found")
+    
+    # 2. 加载dense模型参数（使用strict=False处理表名不匹配）
+    save_path = os.path.join(
+        checkpoint_dir, "torch_module", "model.{}.pth".format(dist.get_rank())
+    )
+    if os.path.exists(save_path):
+        print("Loading dense model parameters...")
+        state_dict = torch.load(save_path, map_location="cpu")
+        if "model_state_dict" in state_dict:
+            # 处理表名不匹配：interaction vs interaction_weights
+            model_state_dict = state_dict["model_state_dict"]
+            new_state_dict = {}
+            for key, value in model_state_dict.items():
+                # 替换表名：interaction_weights -> interaction
+                new_key = key.replace("interaction_weights", "interaction")
+                new_key = new_key.replace("action_weights", "interaction")
+                new_state_dict[new_key] = value
+            
+            # 使用strict=False加载，忽略dynamic embedding表的形状不匹配
+            missing_keys, unexpected_keys = unwrapped_model.load_state_dict(
+                new_state_dict, strict=False
+            )
+            if missing_keys:
+                print(f"Warning: Missing keys (expected for dynamic embeddings): {missing_keys[:5]}...")
+            if unexpected_keys:
+                print(f"Warning: Unexpected keys: {unexpected_keys[:5]}...")
+            print("Dense model parameters loaded")
+        else:
+            print(f"Warning: No model_state_dict in checkpoint file")
+    else:
+        print(f"Warning: Checkpoint file {save_path} not found")
+    
     print("Checkpoint loaded successfully")
     
     # 加载完checkpoint后，将模型移到指定设备
