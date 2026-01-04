@@ -101,9 +101,42 @@ def load_model_from_checkpoint(
     # 但为了只导出item_id embedding，我们跳过这一步以避免形状不匹配错误
     print("Skipping dense model parameters loading (only need item_id embeddings)")
     
-    # 移动到CUDA
-    if torch.cuda.is_available():
-        model = model.cuda()
+    # 修复所有meta tensor（因为跳过了dense参数加载，这些参数仍然是meta tensor）
+    def fix_meta_tensors(module, prefix=""):
+        """将meta tensor初始化为零tensor"""
+        fixed_count = 0
+        for name, param in list(module.named_parameters(recurse=False)):
+            if param.is_meta:
+                full_name = f"{prefix}.{name}" if prefix else name
+                try:
+                    # 创建相同形状的零tensor
+                    new_param = torch.nn.Parameter(torch.zeros(param.shape, dtype=param.dtype, device="cpu"))
+                    # 直接替换参数
+                    if hasattr(module, name):
+                        delattr(module, name)
+                    setattr(module, name, new_param)
+                    fixed_count += 1
+                except Exception as e:
+                    print(f"  Warning: Failed to fix {full_name}: {e}")
+        for child_name, child in module.named_children():
+            child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+            fixed_count += fix_meta_tensors(child, child_prefix)
+        return fixed_count
+    
+    # 检查并修复meta tensor
+    meta_params = []
+    for name, param in unwrapped_model.named_parameters():
+        if param.is_meta:
+            meta_params.append(name)
+    
+    if meta_params:
+        print(f"Found {len(meta_params)} meta tensor parameters, initializing them...")
+        fixed_count = fix_meta_tensors(unwrapped_model)
+        print(f"Fixed {fixed_count} meta tensor parameters")
+    
+    # 注意：导出embedding不需要模型在CUDA上，export_local_embedding会将数据移到CPU
+    # 所以我们可以保持在CPU上，避免meta tensor问题
+    print("Model ready (staying on CPU for embedding export)")
     
     print("Checkpoint loaded successfully")
     return model
