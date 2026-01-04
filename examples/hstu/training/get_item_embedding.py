@@ -88,11 +88,37 @@ def load_model_from_checkpoint(
     
     # 1. 加载dynamic embedding表
     from dynamicemb.dump_load import DynamicEmbLoad as dynamic_emb_load
+    from dynamicemb.dump_load import get_dynamic_emb_module as check_dynamic_modules
+    
     save_dir = os.path.join(checkpoint_dir, "dynamicemb_module")
+    print(f"Checking dynamic embedding directory: {save_dir}")
+    print(f"Directory exists: {os.path.exists(save_dir)}")
+    
     if os.path.exists(save_dir):
-        print("Loading dynamic embedding tables...")
+        # 列出目录内容
+        print(f"Contents of {save_dir}:")
+        for item in os.listdir(save_dir):
+            item_path = os.path.join(save_dir, item)
+            if os.path.isdir(item_path):
+                print(f"  [DIR] {item}/")
+                for subitem in os.listdir(item_path):
+                    print(f"    - {subitem}")
+            else:
+                print(f"  [FILE] {item}")
+        
+        print("\nBefore loading - checking for dynamic embedding modules...")
+        modules_before = check_dynamic_modules(unwrapped_model)
+        print(f"Found {len(modules_before)} dynamic embedding modules before loading")
+        
+        print("\nLoading dynamic embedding tables...")
         dynamic_emb_load(save_dir, unwrapped_model, optim=False)
         print("Dynamic embedding tables loaded")
+        
+        print("\nAfter loading - checking for dynamic embedding modules...")
+        modules_after = check_dynamic_modules(unwrapped_model)
+        print(f"Found {len(modules_after)} dynamic embedding modules after loading")
+        for i, m in enumerate(modules_after):
+            print(f"  Module {i}: {type(m)}, tables: {getattr(m, 'table_names', 'N/A')}")
     else:
         print(f"Warning: Dynamic embedding directory {save_dir} not found")
     
@@ -172,8 +198,17 @@ def export_all_item_embeddings(
     try:
         from dynamicemb.dump_load import get_dynamic_emb_module
         
-        # 获取model_parallel_embedding_collection
-        if not hasattr(embedding_collection, "_model_parallel_embedding_collection"):
+        # 打印embedding_collection的结构
+        print(f"Embedding collection type: {type(embedding_collection)}")
+        print(f"Embedding collection attributes: {dir(embedding_collection)}")
+        
+        # 检查model_parallel和data_parallel collections
+        has_mp = hasattr(embedding_collection, "_model_parallel_embedding_collection")
+        has_dp = hasattr(embedding_collection, "_data_parallel_embedding_collection")
+        print(f"Has model_parallel_embedding_collection: {has_mp}")
+        print(f"Has data_parallel_embedding_collection: {has_dp}")
+        
+        if not has_mp:
             print("Error: embedding_collection does not have _model_parallel_embedding_collection")
             return {}
         
@@ -182,11 +217,30 @@ def export_all_item_embeddings(
             print("Error: model_parallel_embedding_collection is None")
             return {}
         
+        print(f"Model parallel collection type: {type(model_parallel_collection)}")
+        
         # 获取dynamic embedding modules
         dynamicemb_modules = get_dynamic_emb_module(model_parallel_collection)
         
+        print(f"Found {len(dynamicemb_modules)} dynamic embedding modules")
+        
         if len(dynamicemb_modules) == 0:
             print("Error: No dynamic embedding modules found")
+            print("Trying to inspect model_parallel_collection structure...")
+            
+            # 尝试打印更多信息
+            if hasattr(model_parallel_collection, '_lookups'):
+                print(f"  Has _lookups: {type(model_parallel_collection._lookups)}")
+            if hasattr(model_parallel_collection, '_embedding_configs'):
+                print(f"  Has _embedding_configs: {model_parallel_collection._embedding_configs}")
+            if hasattr(model_parallel_collection, 'embedding_configs'):
+                print(f"  Has embedding_configs(): {model_parallel_collection.embedding_configs()}")
+            
+            # 尝试查找所有子模块
+            print("All named modules:")
+            for name, module in model_parallel_collection.named_modules():
+                print(f"  {name}: {type(module)}")
+            
             return {}
         
         print(f"Found {len(dynamicemb_modules)} dynamic embedding modules")
