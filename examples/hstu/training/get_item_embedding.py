@@ -103,7 +103,7 @@ def load_model_from_checkpoint(
     else:
         print(f"Warning: Dynamic embedding directory {save_dir} not found")
     
-    # 2. 加载dense模型参数（使用strict=False处理表名不匹配）
+    # 2. 加载dense模型参数（过滤掉dynamic embedding表的参数）
     save_path = os.path.join(
         checkpoint_dir, "torch_module", "model.{}.pth".format(dist.get_rank())
     )
@@ -114,18 +114,49 @@ def load_model_from_checkpoint(
             # 处理表名不匹配：interaction vs interaction_weights
             model_state_dict = state_dict["model_state_dict"]
             new_state_dict = {}
+            
+            # 获取dynamic embedding表名列表
+            dynamic_table_names = set()
+            if hasattr(unwrapped_model, "_embedding_collection"):
+                embedding_collection = unwrapped_model._embedding_collection
+                if hasattr(embedding_collection, "_dynamic_embedding_collection"):
+                    dynamic_emb_collection = embedding_collection._dynamic_embedding_collection
+                    if hasattr(dynamic_emb_collection, "_embedding_tables"):
+                        dynamic_tables = dynamic_emb_collection._embedding_tables
+                        if hasattr(dynamic_tables, "table_names"):
+                            dynamic_table_names = set(dynamic_tables.table_names)
+                            print(f"Dynamic embedding table names: {dynamic_table_names}")
+            
+            # 过滤掉dynamic embedding表的参数，只保留dense模型参数
             for key, value in model_state_dict.items():
+                # 跳过dynamic embedding表的参数
+                is_dynamic_emb = False
+                for table_name in dynamic_table_names:
+                    if f".{table_name}." in key or f".{table_name}_" in key:
+                        is_dynamic_emb = True
+                        break
+                
+                if is_dynamic_emb:
+                    print(f"Skipping dynamic embedding parameter: {key}")
+                    continue
+                
                 # 替换表名：interaction_weights -> interaction
                 new_key = key.replace("interaction_weights", "interaction")
                 new_key = new_key.replace("action_weights", "interaction")
                 new_state_dict[new_key] = value
             
-            # 使用strict=False加载，忽略dynamic embedding表的形状不匹配
+            print(f"Loading {len(new_state_dict)} dense model parameters...")
+            # 使用strict=False加载
             missing_keys, unexpected_keys = unwrapped_model.load_state_dict(
                 new_state_dict, strict=False
             )
             if missing_keys:
-                print(f"Warning: Missing keys (expected for dynamic embeddings): {missing_keys[:5]}...")
+                # 过滤掉dynamic embedding相关的missing keys
+                filtered_missing = [k for k in missing_keys if not any(
+                    f".{tn}." in k or f".{tn}_" in k for tn in dynamic_table_names
+                )]
+                if filtered_missing:
+                    print(f"Warning: Missing keys: {filtered_missing[:5]}...")
             if unexpected_keys:
                 print(f"Warning: Unexpected keys: {unexpected_keys[:5]}...")
             print("Dense model parameters loaded")
