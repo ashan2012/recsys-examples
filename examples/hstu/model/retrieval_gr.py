@@ -197,5 +197,6 @@ class RetrievalGR(BaseModel):
     def get_item_feature_table_name(self) -> str:
         for embedding_config in self._task_config.embedding_configs:
             if self._item_feature_name in embedding_config.feature_names:
+##                return table_name
                 return embedding_config.table_name
         raise ValueError(f"Item feature name '{self._item_feature_name}' not found in any embedding config")
