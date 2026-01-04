@@ -23,7 +23,7 @@ import commons.utils.initialize as init
 from commons.checkpoint import get_unwrapped_module
 from configs import RetrievalConfig
 from model import get_retrieval_model
-from pipelines import make_optimizer_and_shard
+from distributed.sharding import make_optimizer_and_shard
 from trainer.utils import (
     create_dynamic_optitons_dict,
     create_embedding_configs,
