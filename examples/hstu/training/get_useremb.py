@@ -126,10 +126,11 @@ def main():
             print("batch")
             print(batch)
             print("embedding:")
-            print(embedding.cpu().numpy())
+            print(embedding.cpu().float().numpy())  # 转换为 float32 再转 numpy
             print("embedding shape:")
             print(embedding.shape)
             print("embedding dtype:")
+            print(embedding.dtype)
     init.destroy_global_state()
 
 
