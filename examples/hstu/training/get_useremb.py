@@ -166,11 +166,25 @@ def main():
             # 将 embedding 转换为 numpy（注意 BFloat16 需要先转 float32）
             embedding_numpy = embedding.cpu().float().numpy()
             
-            # 获取 batch size
-            batch_size = embedding_numpy.shape[0]
+            # 获取 batch size（使用 lengths 的实际长度）
+            # JaggedTensor 的 lengths 表示每个样本的序列长度
+            if user_id_data is not None:
+                batch_size = len(user_id_data['lengths'])
+            elif item_id_data is not None:
+                batch_size = len(item_id_data['lengths'])
+            else:
+                batch_size = embedding_numpy.shape[0]
+            
+            # 确保 batch_size 不超过 embedding 的数量
+            batch_size = min(batch_size, embedding_numpy.shape[0])
             
             print(f"\n{'='*80}")
             print(f"Batch {batch_idx + 1} - Processing {batch_size} samples")
+            print(f"  Embedding shape: {embedding_numpy.shape}")
+            if user_id_data is not None:
+                print(f"  User lengths shape: {user_id_data['lengths'].shape}")
+            if item_id_data is not None:
+                print(f"  Item lengths shape: {item_id_data['lengths'].shape}")
             print(f"{'='*80}")
             
             # 逐条打印每个样本的信息
@@ -182,51 +196,59 @@ def main():
                 
                 print(f"\n--- Sample {sample_count} (Batch {batch_idx + 1}, Index {i}) ---")
                 
-                # 初始化变量
+                # 初始化变量（防止未定义错误）
                 user_values = None
                 item_values = None
+                sample_embedding = None
                 
                 # 打印 user_id（根据 lengths 提取该样本的 user_id）
-                if user_id_data is not None:
+                if user_id_data is not None and i < len(user_id_data['lengths']):
                     user_length = int(user_id_data['lengths'][i])
                     user_values = user_id_data['values'][user_offset:user_offset + user_length]
                     user_offset += user_length
                     
                     if len(user_values) == 1:
                         print(f"User ID: {user_values[0]}")
-                    else:
+                    elif len(user_values) > 0:
                         print(f"User IDs (sequence): {user_values[:10]}{'...' if len(user_values) > 10 else ''} (total: {len(user_values)})")
+                    else:
+                        print(f"User ID: Empty sequence")
                 else:
-                    print(f"User ID: Not found in features")
+                    print(f"User ID: Not found in features (i={i}, lengths={len(user_id_data['lengths']) if user_id_data else 'N/A'})")
                 
                 # 打印 item_id（根据 lengths 提取该样本的 item_id 序列）
-                if item_id_data is not None:
+                if item_id_data is not None and i < len(item_id_data['lengths']):
                     item_length = int(item_id_data['lengths'][i])
                     item_values = item_id_data['values'][item_offset:item_offset + item_length]
                     item_offset += item_length
                     
-                    if len(item_values) <= 5:
+                    if len(item_values) == 0:
+                        print(f"Item IDs: Empty sequence")
+                    elif len(item_values) <= 5:
                         print(f"Item IDs (sequence): {item_values.tolist()}")
                     else:
                         print(f"Item IDs (sequence): {item_values[:5].tolist()} ... {item_values[-2:].tolist()} (total: {len(item_values)})")
                 else:
-                    print(f"Item IDs: Not found in features")
+                    print(f"Item IDs: Not found in features (i={i}, lengths={len(item_id_data['lengths']) if item_id_data else 'N/A'})")
                 
-                # 打印 embedding
-                sample_embedding = embedding_numpy[i]
-                print(f"Embedding shape: {sample_embedding.shape}")
-                print(f"Embedding dtype: {embedding.dtype}")
-                print(f"Embedding (first 10 dims): {sample_embedding[:10]}")
-                print(f"Embedding norm: {np.linalg.norm(sample_embedding):.6f}")
+                # 打印 embedding（检查索引是否有效）
+                if i < len(embedding_numpy):
+                    sample_embedding = embedding_numpy[i]
+                    print(f"Embedding shape: {sample_embedding.shape}")
+                    print(f"Embedding dtype: {embedding.dtype}")
+                    print(f"Embedding (first 10 dims): {sample_embedding[:10]}")
+                    print(f"Embedding norm: {np.linalg.norm(sample_embedding):.6f}")
+                else:
+                    print(f"Embedding: Index {i} out of bounds (total: {len(embedding_numpy)})")
                 
                 # 保存数据到列表（用于后续写入文件）
-                if args.output_file:
+                if args.output_file and sample_embedding is not None:
                     sample_data = {
                         'sample_id': sample_count,
                         'batch_idx': batch_idx + 1,
                         'batch_inner_idx': i,
-                        'user_ids': user_values.tolist() if user_values is not None else None,
-                        'item_ids': item_values.tolist() if item_values is not None else None,
+                        'user_ids': user_values.tolist() if user_values is not None and hasattr(user_values, 'tolist') else None,
+                        'item_ids': item_values.tolist() if item_values is not None and hasattr(item_values, 'tolist') else None,
                         'embedding': sample_embedding.tolist(),
                         'embedding_norm': float(np.linalg.norm(sample_embedding)),
                     }
