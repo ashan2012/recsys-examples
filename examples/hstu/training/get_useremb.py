@@ -123,8 +123,6 @@ def main():
             embedding, _, _, _ = get_unwrapped_module(model_train).get_logit_and_labels(batch.to(torch.device("cuda", torch.cuda.current_device())))
             print("batch features:")
             print(batch.features.to_dict())
-            print("batch labels:")
-            print(batch.labels)
             print("batch item_ids:")
             print(batch.item_ids)
             print("batch user_ids:")
