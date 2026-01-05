@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--output_file", type=str, default=None, help="Output file to save embeddings (optional)")
     parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to process (for testing)")
     parser.add_argument("--count_only", action="store_true", help="Only count total samples without extracting embeddings")
+    parser.add_argument("--use_full_data", action="store_true", help="Use all data as test set (override train_split_ratio)")
     args = parser.parse_args()
     gin.parse_config_file(args.gin_config_file)
     trainer_args = TrainerArgs()
@@ -116,9 +117,26 @@ def main():
         dynamicemb_options_dict=dynamic_options_dict,
         pipeline_type=trainer_args.pipeline_type,
     )
+    
+    # 如果使用全部数据，临时修改 train_split_ratio
+    original_train_split_ratio = dataset_args.train_split_ratio
+    if args.use_full_data:
+        print("=" * 80)
+        print("Using FULL DATA as test set (--use_full_data mode)")
+        print(f"Original train_split_ratio: {original_train_split_ratio}")
+        print("Temporarily setting train_split_ratio to 0.0")
+        print("All data will be loaded as test set")
+        print("=" * 80)
+        dataset_args.train_split_ratio = 0.0
+    
     train_dataloader, test_dataloader = get_data_loader(
         "retrieval", dataset_args, trainer_args, 0
     )
+    
+    # 恢复原始的 train_split_ratio
+    if args.use_full_data:
+        dataset_args.train_split_ratio = original_train_split_ratio
+    
     maybe_load_ckpts(trainer_args.ckpt_load_dir, model, dense_optimizer)
 
     model_train.eval()
@@ -127,20 +145,29 @@ def main():
     num_test_batches = len(test_dataloader)
     test_batch_size = trainer_args.eval_batch_size
     estimated_total_samples = num_test_batches * test_batch_size
-
+ 
     num_train_batches = len(train_dataloader)
     train_batch_size = trainer_args.train_batch_size
     train_total_samples = num_train_batches * train_batch_size
-    print("train,test total samples: ", train_total_samples, estimated_total_samples)
-
-
+    
+    # 获取实际使用的 split ratio
+    actual_split_ratio = dataset_args.train_split_ratio
     
     print("=" * 80)
-    print("Test Dataset Information")
+    print("Dataset Information")
     print("=" * 80)
-    print(f"Number of batches: {num_test_batches}")
-    print(f"Batch size: {test_batch_size}")
-    print(f"Estimated total samples: ~{estimated_total_samples}")
+    if args.use_full_data:
+        print("MODE: Using FULL DATA (all samples)")
+        print(f"Total batches: {num_test_batches}")
+        print(f"Batch size: {test_batch_size}")
+        print(f"Estimated total samples: ~{estimated_total_samples}")
+    else:
+        print("MODE: Using TEST SET only")
+        print(f"Train/Test split ratio: {actual_split_ratio:.1%} / {1-actual_split_ratio:.1%}")
+        print(f"Train samples: ~{train_total_samples}")
+        print(f"Test samples: ~{estimated_total_samples}")
+        print(f"Test batches: {num_test_batches}")
+        print(f"Test batch size: {test_batch_size}")
     print(f"  (actual count may be slightly different due to incomplete last batch)")
     print("=" * 80)
     
@@ -306,7 +333,7 @@ def main():
                 
                 # 打印 embedding（检查索引是否有效）
                 if i < len(embedding_numpy):
-                    sample_embedding = embedding_numpy[item_offset-i-1]
+                    sample_embedding = embedding_numpy[i]
                     print(f"Embedding shape: {sample_embedding.shape}")
                     print(f"Embedding dtype: {embedding.dtype}")
                     print(f"Embedding (first 10 dims): {sample_embedding[:10]}")

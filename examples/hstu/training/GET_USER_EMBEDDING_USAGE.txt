@@ -21,6 +21,14 @@ get_useremb.py 脚本可以：
        --count_only
 
 
+1b. 统计全部数据样本数（使用 --use_full_data）:
+
+   torchrun --nproc_per_node=4 get_useremb.py \
+       --gin-config-file ./configs/gameid_retrieval.gin \
+       --use_full_data \
+       --count_only
+
+
 2. 提取 embeddings 并打印到控制台:
 
    torchrun --nproc_per_node=4 get_useremb.py \
@@ -55,6 +63,7 @@ get_useremb.py 脚本可以：
 --output_file         输出文件路径（可选，不提供则只打印）
 --max_samples         最大处理样本数（可选，用于测试）
 --count_only          只统计样本数，不提取 embedding（可选）
+--use_full_data       使用全部数据作为测试集（可选，默认只用测试集）
 
 
 输出示例:
@@ -242,13 +251,47 @@ A: 减少 TrainerArgs.eval_batch_size
    或者分多次处理
 
 
+重要说明: 全部数据 vs 测试集
+--------------------------------
+
+默认行为（不使用 --use_full_data）:
+  - 只处理测试集数据（例如 30%）
+  - 适合验证模型、调试
+
+使用 --use_full_data:
+  - 处理全部数据（100%，包括训练集+测试集）
+  - 适合生产环境、构建完整用户画像
+
+示例对比:
+
+  # 只处理测试集（约 30% 数据）
+  torchrun --nproc_per_node=4 get_useremb.py \
+      --gin-config-file ./configs/gameid_retrieval.gin \
+      --count_only
+  
+  输出: Total samples: ~32000
+
+  # 处理全部数据（100% 数据）
+  torchrun --nproc_per_node=4 get_useremb.py \
+      --gin-config-file ./configs/gameid_retrieval.gin \
+      --use_full_data \
+      --count_only
+  
+  输出: Total samples: ~106000
+
+
 详细文档:
 ----------
-查看 GET_USER_EMBEDDING_README.md 获取完整文档
+- GET_USER_EMBEDDING_README.md    - 完整使用文档
+- GET_USER_EMB_FULL_DATA.md       - 全量数据提取详细说明（重要！）
 
 
 ================================================================================
 快速开始: torchrun --nproc_per_node=4 get_useremb.py \
               --gin-config-file ./configs/gameid_retrieval.gin --count_only
+
+提取全量: torchrun --nproc_per_node=4 get_useremb.py \
+              --gin-config-file ./configs/gameid_retrieval.gin \
+              --use_full_data --output_file user_emb_all.npz --max_samples 200000
 ================================================================================
 
