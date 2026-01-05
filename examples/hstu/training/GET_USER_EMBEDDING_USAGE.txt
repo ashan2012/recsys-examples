@@ -1,0 +1,254 @@
+================================================================================
+用户 Embedding 提取 - 快速使用指南
+================================================================================
+
+功能说明:
+----------
+get_useremb.py 脚本可以：
+1. 统计测试集样本总数
+2. 提取每个样本的 user_id、item_ids 和 embedding
+3. 保存结果到文件（JSON 或 NPZ 格式）
+4. 显示处理进度
+
+
+基本命令:
+----------
+
+1. 只统计测试集样本数（最快）:
+
+   torchrun --nproc_per_node=4 get_useremb.py \
+       --gin-config-file ./configs/gameid_retrieval.gin \
+       --count_only
+
+
+2. 提取 embeddings 并打印到控制台:
+
+   torchrun --nproc_per_node=4 get_useremb.py \
+       --gin-config-file ./configs/gameid_retrieval.gin
+
+
+3. 提取 embeddings 并保存到文件:
+
+   # 保存为 JSON 格式
+   torchrun --nproc_per_node=4 get_useremb.py \
+       --gin-config-file ./configs/gameid_retrieval.gin \
+       --output_file user_embeddings.json
+
+   # 保存为 NPZ 格式（推荐，更省空间）
+   torchrun --nproc_per_node=4 get_useremb.py \
+       --gin-config-file ./configs/gameid_retrieval.gin \
+       --output_file user_embeddings.npz
+
+
+4. 限制处理样本数（快速测试）:
+
+   torchrun --nproc_per_node=4 get_useremb.py \
+       --gin-config-file ./configs/gameid_retrieval.gin \
+       --output_file user_embeddings.json \
+       --max_samples 100
+
+
+参数说明:
+----------
+
+--gin-config-file     配置文件路径（必需）
+--output_file         输出文件路径（可选，不提供则只打印）
+--max_samples         最大处理样本数（可选，用于测试）
+--count_only          只统计样本数，不提取 embedding（可选）
+
+
+输出示例:
+----------
+
+$ torchrun --nproc_per_node=4 get_useremb.py \
+      --gin-config-file ./configs/gameid_retrieval.gin \
+      --count_only
+
+================================================================================
+Test Dataset Information
+================================================================================
+Number of batches: 250
+Batch size: 128
+Estimated total samples: ~32000
+  (actual count may be slightly different due to incomplete last batch)
+================================================================================
+
+================================================================================
+Counting exact number of samples (--count_only mode)
+================================================================================
+  Processed 10/250 batches, 1280 samples so far...
+  Processed 20/250 batches, 2560 samples so far...
+  ...
+  Processed 250/250 batches, 31845 samples so far...
+
+================================================================================
+Exact Count Result
+================================================================================
+Total samples in test set: 31845
+Total batches: 250
+Average batch size: 127.38
+================================================================================
+
+
+提取 embeddings 时的输出:
+--------------------------
+
+================================================================================
+Test Dataset Information
+================================================================================
+Number of batches: 250
+Batch size: 128
+Estimated total samples: ~32000
+================================================================================
+
+================================================================================
+Starting inference and extracting embeddings for each sample
+Results will be saved to: user_embeddings.json
+Maximum samples to process: 100
+================================================================================
+
+================================================================================
+Batch 1/250 - Processing 128 samples
+  Samples processed before this batch: 0
+  Overall progress: 0/32000 (0.0%)
+  Embedding shape: (128, 256)
+  User lengths shape: (128,)
+  Item lengths shape: (128,)
+================================================================================
+
+--- Sample 1 (Batch 1, Index 0) ---
+User ID: 12345
+Item IDs (sequence): [101, 203, 456, 789, 1024] ... [5678, 9012] (total: 50)
+Embedding shape: (256,)
+Embedding dtype: torch.bfloat16
+Embedding (first 10 dims): [ 0.0234 -0.0156  0.0421 ...]
+Embedding norm: 1.234567
+
+--- Sample 2 (Batch 1, Index 1) ---
+...
+
+================================================================================
+Inference Complete
+================================================================================
+Total samples in test set: ~32000
+Samples processed: 100
+Processing rate: 0.3%
+Batches processed: 1 / 250
+================================================================================
+
+Saving results to user_embeddings.json...
+Saved 100 samples to user_embeddings.json (JSON format)
+
+
+加载保存的结果:
+----------------
+
+JSON 格式:
+  
+  import json
+  
+  with open('user_embeddings.json', 'r') as f:
+      data = json.load(f)
+  
+  print(f"Loaded {len(data)} samples")
+  
+  # 查看第一个样本
+  sample = data[0]
+  print(f"User IDs: {sample['user_ids']}")
+  print(f"Item IDs: {sample['item_ids']}")
+  print(f"Embedding: {sample['embedding'][:10]}...")
+
+
+NPZ 格式:
+  
+  import numpy as np
+  import json
+  
+  data = np.load('user_embeddings.npz', allow_pickle=True)
+  
+  embeddings = data['embeddings']      # shape: (N, 256)
+  sample_ids = data['sample_ids']      # shape: (N,)
+  metadata = json.loads(str(data['metadata']))
+  
+  print(f"Loaded {len(embeddings)} embeddings")
+  print(f"Embedding dimension: {embeddings.shape[1]}")
+  
+  # 查看第一个样本的 metadata
+  print(f"User IDs: {metadata[0]['user_ids']}")
+  print(f"Item IDs: {metadata[0]['item_ids']}")
+
+
+典型工作流程:
+--------------
+
+步骤 1: 先统计样本数
+  torchrun --nproc_per_node=4 get_useremb.py \
+      --gin-config-file ./configs/gameid_retrieval.gin \
+      --count_only
+
+步骤 2: 根据需要提取部分或全部 embeddings
+  # 如果样本数很多，先测试少量样本
+  torchrun --nproc_per_node=4 get_useremb.py \
+      --gin-config-file ./configs/gameid_retrieval.gin \
+      --output_file user_emb_test.json \
+      --max_samples 100
+
+步骤 3: 确认无误后，提取全部数据
+  # 使用 NPZ 格式节省空间
+  torchrun --nproc_per_node=4 get_useremb.py \
+      --gin-config-file ./configs/gameid_retrieval.gin \
+      --output_file user_embeddings_all.npz \
+      --max_samples 10000
+
+
+注意事项:
+----------
+
+1. 默认只处理前3个batch（demo模式）
+   - 使用 --max_samples 参数来处理更多样本
+   - 或修改代码中的 batch 限制
+
+2. GPU 内存
+   - 确保有足够的 GPU 内存加载模型
+   - 如果内存不足，减少 batch_size
+
+3. 处理时间
+   - 统计样本数（--count_only）很快，几秒钟
+   - 提取 embeddings 较慢，取决于样本数
+
+4. 文件大小
+   - JSON 文件较大但可读
+   - NPZ 文件小 3-5 倍，推荐使用
+
+5. GPU 数量
+   - --nproc_per_node 应与训练时相同
+   - 通常为 4
+
+
+故障排查:
+----------
+
+Q: IndexError: index out of bounds
+A: 已修复，确保使用最新版本的脚本
+
+Q: 样本数显示 0 或很少
+A: 检查配置文件中的 train_split_ratio 和数据路径
+
+Q: 只处理了 3 个 batch
+A: 这是默认行为，使用 --max_samples 参数覆盖
+
+Q: 内存不足
+A: 减少 TrainerArgs.eval_batch_size
+   或者分多次处理
+
+
+详细文档:
+----------
+查看 GET_USER_EMBEDDING_README.md 获取完整文档
+
+
+================================================================================
+快速开始: torchrun --nproc_per_node=4 get_useremb.py \
+              --gin-config-file ./configs/gameid_retrieval.gin --count_only
+================================================================================
+

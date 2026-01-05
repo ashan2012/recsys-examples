@@ -80,6 +80,7 @@ def main():
     parser.add_argument("--gin-config-file", type=str, required=True, help="Path to gin config file")
     parser.add_argument("--output_file", type=str, default=None, help="Output file to save embeddings (optional)")
     parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to process (for testing)")
+    parser.add_argument("--count_only", action="store_true", help="Only count total samples without extracting embeddings")
     args = parser.parse_args()
     gin.parse_config_file(args.gin_config_file)
     trainer_args = TrainerArgs()
@@ -122,12 +123,73 @@ def main():
 
     model_train.eval()
     
+    # 统计测试集信息
+    num_test_batches = len(test_dataloader)
+    test_batch_size = trainer_args.eval_batch_size
+    estimated_total_samples = num_test_batches * test_batch_size
+    
     print("=" * 80)
+    print("Test Dataset Information")
+    print("=" * 80)
+    print(f"Number of batches: {num_test_batches}")
+    print(f"Batch size: {test_batch_size}")
+    print(f"Estimated total samples: ~{estimated_total_samples}")
+    print(f"  (actual count may be slightly different due to incomplete last batch)")
+    print("=" * 80)
+    
+    # 如果只统计数量，快速遍历一次
+    if args.count_only:
+        print("\n" + "=" * 80)
+        print("Counting exact number of samples (--count_only mode)")
+        print("=" * 80)
+        
+        exact_count = 0
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(test_dataloader):
+                # 获取 batch 中的 features
+                features_dict = batch.features.to_dict()
+                
+                # 获取 batch size
+                if 'user_id' in features_dict:
+                    user_jt = features_dict['user_id']
+                    batch_size = len(user_jt.lengths())
+                elif 'item_id' in features_dict:
+                    item_jt = features_dict['item_id']
+                    batch_size = len(item_jt.lengths())
+                else:
+                    # 如果都没有，尝试从其他 feature 获取
+                    for key, value in features_dict.items():
+                        if hasattr(value, 'lengths'):
+                            batch_size = len(value.lengths())
+                            break
+                    else:
+                        batch_size = test_batch_size
+                
+                exact_count += batch_size
+                
+                if (batch_idx + 1) % 10 == 0:
+                    print(f"  Processed {batch_idx + 1}/{num_test_batches} batches, {exact_count} samples so far...")
+        
+        print(f"\n{'='*80}")
+        print(f"Exact Count Result")
+        print(f"{'='*80}")
+        print(f"Total samples in test set: {exact_count}")
+        print(f"Total batches: {num_test_batches}")
+        print(f"Average batch size: {exact_count / num_test_batches:.2f}")
+        print(f"{'='*80}")
+        
+        init.destroy_global_state()
+        return
+    
+    print("\n" + "=" * 80)
     print("Starting inference and extracting embeddings for each sample")
     if args.output_file:
         print(f"Results will be saved to: {args.output_file}")
     if args.max_samples:
         print(f"Maximum samples to process: {args.max_samples}")
+    else:
+        print(f"Processing limit: First 3 batches (demo mode)")
+        print(f"  Use --max_samples to process more samples")
     print("=" * 80)
     
     # 用于保存所有样本的数据
@@ -179,7 +241,10 @@ def main():
             batch_size = min(batch_size, embedding_numpy.shape[0])
             
             print(f"\n{'='*80}")
-            print(f"Batch {batch_idx + 1} - Processing {batch_size} samples")
+            print(f"Batch {batch_idx + 1}/{num_test_batches} - Processing {batch_size} samples")
+            print(f"  Samples processed before this batch: {sample_count}")
+            if estimated_total_samples > 0:
+                print(f"  Overall progress: {sample_count}/{estimated_total_samples} ({sample_count/estimated_total_samples*100:.1f}%)")
             print(f"  Embedding shape: {embedding_numpy.shape}")
             if user_id_data is not None:
                 print(f"  User lengths shape: {user_id_data['lengths'].shape}")
@@ -274,7 +339,13 @@ def main():
                 break
     
     print(f"\n{'='*80}")
-    print(f"Inference complete. Total samples processed: {sample_count}")
+    print(f"Inference Complete")
+    print(f"{'='*80}")
+    print(f"Total samples in test set: ~{estimated_total_samples}")
+    print(f"Samples processed: {sample_count}")
+    if estimated_total_samples > 0:
+        print(f"Processing rate: {sample_count/estimated_total_samples*100:.1f}%")
+    print(f"Batches processed: {batch_idx + 1 if 'batch_idx' in locals() else 0} / {num_test_batches}")
     print(f"{'='*80}")
     
     # 保存结果到文件
