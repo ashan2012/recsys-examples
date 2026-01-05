@@ -14,7 +14,7 @@ echo "Training start: ${start_str}"
 
 export PYTHONPATH=:/workspace/recsys-examples-eval/recsys-examples/examples
 
-torchrun --nproc_per_node 1 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 6000 ./training/pretrain_gr_retrieval_evalnew.py --gin-config-file ./training/configs/gameid_retrieval_eval.gin 
+torchrun --nproc_per_node 1 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 6000 ./training/get_useremb.py --gin-config-file ./training/configs/gameid_retrieval_eval.gin 
 
 end_ts=$(date +%s)
 end_str=$(date '+%F %T')
