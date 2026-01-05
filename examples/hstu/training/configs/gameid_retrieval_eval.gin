@@ -9,7 +9,7 @@ TrainerArgs.ckpt_save_dir = "./ckpt_re_test"
 
 DatasetArgs.dataset_name = 'gameid'
 # Update this path so that <dataset_path>/gameid/interactions.csv exists.
-DatasetArgs.dataset_path = '/workspace/recsys-examples-dev-log/recsys-examples/examples/hstu/tmp_data'
+DatasetArgs.dataset_path = '/workspace/recsys-examples-eval/recsys-examples/examples/hstu/tmp_data'
 DatasetArgs.max_sequence_length = 512
 # DatasetArgs.max_num_candidates = 64
 DatasetArgs.shuffle = True
