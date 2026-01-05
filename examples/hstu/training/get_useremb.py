@@ -303,9 +303,10 @@ def main():
                 else:
                     print(f"Item IDs: Not found in features (i={i}, lengths={len(item_id_data['lengths']) if item_id_data else 'N/A'})")
                 
+                
                 # 打印 embedding（检查索引是否有效）
                 if i < len(embedding_numpy):
-                    sample_embedding = embedding_numpy[i]
+                    sample_embedding = embedding_numpy[item_offset-i-1]
                     print(f"Embedding shape: {sample_embedding.shape}")
                     print(f"Embedding dtype: {embedding.dtype}")
                     print(f"Embedding (first 10 dims): {sample_embedding[:10]}")
