@@ -285,6 +285,7 @@ def get_data_loader(
             shuffle=dataset_args.shuffle,
             random_seed=trainer_args.seed,
             eval_batch_size=trainer_args.eval_batch_size,
+            train_split_ratio=dataset_args.train_split_ratio,
         )
     return dataset.get_data_loader(train_dataset), dataset.get_data_loader(test_dataset)  # type: ignore[attr-defined]
 
