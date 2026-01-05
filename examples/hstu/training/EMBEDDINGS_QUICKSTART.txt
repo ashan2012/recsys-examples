@@ -1,0 +1,188 @@
+================================================================================
+Item Embeddings 快速使用指南
+================================================================================
+
+文件说明:
+---------
+导出的 embeddings 保存在两个 .npz 文件中:
+
+1. item_embeddings_arrays.npz (推荐使用)
+   - 数组格式: keys (item_ids) + values (embeddings)
+   - 高效，适合批量处理
+
+2. item_embeddings.npz
+   - 字典格式: {item_0: embedding, item_1: embedding, ...}
+   - 适合单个查询
+
+
+快速上手 (命令行):
+-------------------
+
+# 1. 查看文件信息
+python read_item_embeddings.py --file item_embeddings_arrays.npz --info
+
+# 2. 查询单个 item
+python read_item_embeddings.py --file item_embeddings_arrays.npz --item_id 123
+
+# 3. 查询多个 items
+python read_item_embeddings.py --file item_embeddings_arrays.npz --item_ids 123,456,789
+
+# 4. 计算相似度
+python read_item_embeddings.py --file item_embeddings_arrays.npz --similarity 123,456
+
+# 5. 找相似 items (推荐)
+python read_item_embeddings.py --file item_embeddings_arrays.npz --similar 123 --top_k 10
+
+# 6. 导出为文本
+python read_item_embeddings.py --file item_embeddings_arrays.npz --export_txt output.txt --limit 100
+
+
+Python 代码示例:
+-----------------
+
+1. 加载 embeddings:
+   
+   import numpy as np
+   
+   data = np.load("item_embeddings_arrays.npz")
+   keys = data['keys']      # 所有 item_ids
+   values = data['values']  # 所有 embeddings
+   
+   print(f"加载了 {len(keys)} 个 items")
+   print(f"Embedding 维度: {values.shape[1]}")
+
+
+2. 查询单个 item:
+   
+   item_id = 123
+   mask = (keys == item_id)
+   if mask.any():
+       idx = np.where(mask)[0][0]
+       embedding = values[idx]
+       print(f"Item {item_id}: {embedding}")
+
+
+3. 计算相似度:
+   
+   def cosine_similarity(emb1, emb2):
+       return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
+   
+   emb1 = values[0]
+   emb2 = values[1]
+   similarity = cosine_similarity(emb1, emb2)
+   print(f"相似度: {similarity:.4f}")
+
+
+4. 查找最相似的 items:
+   
+   # 目标 item
+   target_item_id = 123
+   target_emb = values[np.where(keys == target_item_id)[0][0]]
+   
+   # 归一化
+   target_norm = target_emb / np.linalg.norm(target_emb)
+   values_norm = values / np.linalg.norm(values, axis=1, keepdims=True)
+   
+   # 计算相似度
+   similarities = np.dot(values_norm, target_norm)
+   
+   # 获取 top-10
+   top_indices = np.argsort(similarities)[::-1][:10]
+   for idx in top_indices:
+       print(f"Item {keys[idx]}: {similarities[idx]:.4f}")
+
+
+5. 批量查询:
+   
+   query_ids = [123, 456, 789]
+   mask = np.isin(keys, query_ids)
+   found_embeddings = values[mask]
+   print(f"找到 {len(found_embeddings)} 个 embeddings")
+
+
+6. 构建 dict 索引 (更快):
+   
+   embedding_dict = {int(k): v for k, v in zip(keys, values)}
+   
+   # 查询
+   emb = embedding_dict.get(123)
+   if emb is not None:
+       print(f"Found: {emb.shape}")
+
+
+应用场景示例:
+-------------
+
+1. 推荐相似商品:
+   - 用户点击了 item_123
+   - 查找与 item_123 最相似的 10 个 items
+   - 推荐给用户
+
+2. 用户兴趣建模:
+   - 用户历史: [item_1, item_5, item_9, ...]
+   - 计算这些 items 的平均 embedding
+   - 查找与平均 embedding 最相似的新 items
+
+3. 商品聚类:
+   - 对所有 embeddings 做聚类 (K-Means)
+   - 分析每个类别的特征
+   - 用于商品分类和管理
+
+
+性能优化技巧:
+-------------
+
+1. 预先归一化:
+   values_norm = values / np.linalg.norm(values, axis=1, keepdims=True)
+   # 之后计算相似度更快
+
+2. 使用内存映射 (大数据集):
+   data = np.load("file.npz", mmap_mode='r')
+
+3. 构建索引:
+   embedding_dict = {k: v for k, v in zip(keys, values)}
+
+4. 向量化操作:
+   # 好: similarities = np.dot(values_norm, query_norm)
+   # 差: for i in range(len(values)): sim = cosine(values[i], query)
+
+
+常见问题:
+---------
+
+Q: 找不到某个 item_id?
+A: 检查该 item 是否在训练数据中出现过
+   print(f"可用 item_ids: {keys.min()} - {keys.max()}")
+
+Q: 内存不够?
+A: 使用内存映射: np.load(file, mmap_mode='r')
+
+Q: 查询太慢?
+A: 1) 预先归一化 embeddings
+   2) 构建 dict 索引
+   3) 使用 FAISS 等专业库
+
+Q: 如何评估 embedding 质量?
+A: 1) 查看相似 items 是否合理
+   2) 计算平均相似度分布
+   3) 可视化 (PCA/t-SNE)
+
+
+详细文档:
+---------
+查看 EMBEDDINGS_README.md 获取完整文档和高级用法
+
+
+文件结构:
+---------
+read_item_embeddings.py    - 读取和查询脚本
+EMBEDDINGS_README.md       - 完整使用文档
+EMBEDDINGS_QUICKSTART.txt  - 本快速入门 (你正在看的)
+item_embeddings_arrays.npz - 导出的 embeddings (数组格式)
+item_embeddings.npz        - 导出的 embeddings (字典格式)
+
+
+================================================================================
+开始使用: python read_item_embeddings.py --file item_embeddings_arrays.npz --info
+================================================================================
+

@@ -1,0 +1,243 @@
+================================================================================
+模型评估快速指南
+================================================================================
+
+基本用法:
+---------
+
+方法1 - 使用Shell脚本（推荐）:
+
+    # 修改 eval_game.sh 中的路径
+    vim eval_game.sh
+    
+    # 运行评估
+    bash eval_game.sh
+
+
+方法2 - 直接使用torchrun:
+
+    torchrun --nproc_per_node=4 eval_retrieval.py \
+        --gin_config_file ./configs/gameid_retrieval.gin \
+        --checkpoint_dir ./ckpt_re_test/iter100
+
+
+常用命令:
+----------
+
+1. 完整评估（所有测试集）:
+   
+   torchrun --nproc_per_node=4 eval_retrieval.py \
+       --gin_config_file ./configs/gameid_retrieval.gin \
+       --checkpoint_dir ./ckpt_re_test/iter100
+
+
+2. 快速测试（前100个batch）:
+   
+   torchrun --nproc_per_node=4 eval_retrieval.py \
+       --gin_config_file ./configs/gameid_retrieval.gin \
+       --checkpoint_dir ./ckpt_re_test/iter100 \
+       --max_eval_iters 100
+
+
+3. 自定义batch size:
+   
+   torchrun --nproc_per_node=4 eval_retrieval.py \
+       --gin_config_file ./configs/gameid_retrieval.gin \
+       --checkpoint_dir ./ckpt_re_test/iter100 \
+       --eval_batch_size 256
+
+
+4. 批量评估多个checkpoint:
+   
+   for iter in 100 200 300; do
+       torchrun --nproc_per_node=4 eval_retrieval.py \
+           --gin_config_file ./configs/gameid_retrieval.gin \
+           --checkpoint_dir ./ckpt_re_test/iter${iter} \
+           | tee eval_iter${iter}.log
+   done
+   
+   # 比较结果
+   grep "NDCG@10" eval_iter*.log
+
+
+参数说明:
+----------
+
+必需参数:
+  --gin_config_file      配置文件（与训练时相同）
+  --checkpoint_dir       checkpoint目录
+
+可选参数:
+  --max_eval_iters       限制评估batch数（用于快速测试）
+  --eval_batch_size      评估batch size
+
+
+输出示例:
+----------
+
+[eval] [eval 32000 users]:
+    Metrics:
+    NDCG@10: 0.1234      # 归一化折损累积增益@10
+    NDCG@20: 0.1567      # 归一化折损累积增益@20
+    HR@10: 0.2345        # 命中率@10
+    HR@50: 0.4567        # 命中率@50
+
+指标解释:
+- NDCG@K: 考虑排序的准确性，0-1之间，越高越好
+- HR@K: top-K中是否命中真实item，0-1之间，越高越好
+- 数值越接近1.0表示模型效果越好
+
+
+评估指标:
+----------
+
+| 指标      | 说明                        | 取值范围    |
+|-----------|----------------------------|-------------|
+| NDCG@10   | 归一化折损累积增益 (top-10) | 0.0 - 1.0   |
+| NDCG@20   | 归一化折损累积增益 (top-20) | 0.0 - 1.0   |
+| HR@10     | 命中率 (top-10)             | 0.0 - 1.0   |
+| HR@50     | 命中率 (top-50)             | 0.0 - 1.0   |
+| Recall@K  | 召回率 (如配置)             | 0.0 - 1.0   |
+
+
+常见问题:
+----------
+
+Q: 如何选择最佳checkpoint?
+A: 评估多个checkpoint，比较NDCG@10等指标，选择最高的
+   
+   for iter in 100 200 300 400 500; do
+       torchrun --nproc_per_node=4 eval_retrieval.py \
+           --gin_config_file ./configs/gameid_retrieval.gin \
+           --checkpoint_dir ./ckpt_re_test/iter${iter}
+   done
+
+
+Q: 评估时间太长怎么办?
+A: 使用 --max_eval_iters 限制评估batch数
+   
+   --max_eval_iters 100  # 只评估前100个batch
+
+
+Q: GPU内存不足?
+A: 减小batch size
+   
+   --eval_batch_size 64  # 降低batch size
+
+
+Q: 指标为0或异常?
+A: 检查以下几点:
+   1. checkpoint路径是否正确
+   2. 配置文件是否与训练时一致
+   3. train_split_ratio是否与训练时相同
+   4. 用少量batch测试: --max_eval_iters 10
+
+
+Q: 如何与训练时的指标对比?
+A: 训练日志中周期性输出的eval指标应该与此脚本输出一致
+   如果不一致，检查:
+   - 是否使用了相同的checkpoint
+   - 配置文件是否完全一致
+   - 数据分割是否相同
+
+
+注意事项:
+----------
+
+⚠️  确保配置文件与训练时相同（特别是train_split_ratio）
+⚠️  GPU数量应该与训练时相同（--nproc_per_node）
+⚠️  checkpoint目录必须包含 dynamicemb_module 和 torch_module
+⚠️  评估前关闭其他占用GPU的程序
+
+
+Checkpoint目录结构:
+-------------------
+
+ckpt_re_test/iter100/
+├── dynamicemb_module/                   # 必需
+│   └── model._embedding_collection._model_parallel_embedding_collection/
+│       ├── item_id_emb_keys.rank_*.world_size_*
+│       ├── item_id_emb_values.rank_*.world_size_*
+│       └── ...
+└── torch_module/                        # 必需
+    └── mp_rank_*_000000/
+        └── model_optim_rng.pt
+
+
+批量评估脚本示例:
+------------------
+
+#!/bin/bash
+# batch_eval.sh - 批量评估多个checkpoint
+
+CHECKPOINTS=(
+    "./ckpt_re_test/iter100"
+    "./ckpt_re_test/iter200"
+    "./ckpt_re_test/iter300"
+)
+
+CONFIG="./configs/gameid_retrieval.gin"
+RESULTS_DIR="./eval_results"
+
+mkdir -p ${RESULTS_DIR}
+
+for ckpt in "${CHECKPOINTS[@]}"; do
+    name=$(basename ${ckpt})
+    echo "Evaluating ${name}..."
+    
+    torchrun --nproc_per_node=4 eval_retrieval.py \
+        --gin_config_file ${CONFIG} \
+        --checkpoint_dir ${ckpt} \
+        2>&1 | tee ${RESULTS_DIR}/${name}.log
+done
+
+# 汇总结果
+echo ""
+echo "========================================"
+echo "Evaluation Summary"
+echo "========================================"
+for log in ${RESULTS_DIR}/*.log; do
+    name=$(basename ${log} .log)
+    ndcg=$(grep "NDCG@10" ${log} | tail -1 | awk '{print $2}')
+    echo "${name}: NDCG@10 = ${ndcg}"
+done
+echo "========================================"
+
+
+性能对比示例:
+--------------
+
+# 运行批量评估后，比较不同checkpoint的性能:
+
+iter100: NDCG@10 = 0.1234
+iter200: NDCG@10 = 0.1456  ← 性能提升
+iter300: NDCG@10 = 0.1398
+iter400: NDCG@10 = 0.1501  ← 最佳模型
+iter500: NDCG@10 = 0.1488
+
+→ 选择 iter400 作为最终模型
+
+
+详细文档:
+----------
+
+查看 EVAL_README.md 获取:
+  - 详细参数说明
+  - 使用场景示例
+  - 故障排查指南
+  - 高级用法
+
+
+相关文件:
+----------
+
+eval_retrieval.py        - 评估脚本（主程序）
+eval_game.sh            - Shell启动脚本
+EVAL_README.md          - 完整文档
+EVAL_QUICKSTART.txt     - 本快速指南
+
+
+================================================================================
+快速开始: bash eval_game.sh
+================================================================================
+
