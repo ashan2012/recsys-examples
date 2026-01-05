@@ -121,12 +121,7 @@ def main():
     # 如果使用全部数据，临时修改 train_split_ratio
     original_train_split_ratio = dataset_args.train_split_ratio
     if args.use_full_data:
-        print("=" * 80)
-        print("Using FULL DATA as test set (--use_full_data mode)")
-        print(f"Original train_split_ratio: {original_train_split_ratio}")
-        print("Temporarily setting train_split_ratio to 0.001 (~99.9% data as test set)")
-        print("Note: train_split_ratio must be > 0 and < 1 (validation requirement)")
-        print("=" * 80)
+        dataset_args.train_split_ratio = 0.0
     
     train_dataloader, test_dataloader = get_data_loader(
         "retrieval", dataset_args, trainer_args, 0
