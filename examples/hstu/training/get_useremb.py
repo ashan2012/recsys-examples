@@ -127,6 +127,13 @@ def main():
     num_test_batches = len(test_dataloader)
     test_batch_size = trainer_args.eval_batch_size
     estimated_total_samples = num_test_batches * test_batch_size
+
+    num_train_batches = len(train_dataloader)
+    train_batch_size = trainer_args.train_batch_size
+    train_total_samples = num_train_batches * train_batch_size
+    print("train,test total samples: ", train_total_samples, estimated_total_samples)
+
+
     
     print("=" * 80)
     print("Test Dataset Information")
